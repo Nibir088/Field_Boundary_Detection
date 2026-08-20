@@ -32,6 +32,8 @@ This repository provides the codebase for working with the [FTW dataset](https:/
   - [Visualize the FTW Baseline Dataset](#visualize-the-ftw-baseline-dataset)
 - [CC-BY vs. the full model](#cc-by-vs-the-full-model)
 - [Experimentation](#experimentation)
+- [Evaluation](#evaluation)
+  - [Reproducible evaluation setup](#reproducible-evaluation-setup)
 - [Notes](#notes)
 - [Upcoming features](#upcoming-features)
 - [Contributing](#contributing)
@@ -745,6 +747,78 @@ For details on the experimentation process, see [Experimentation section](./EXPE
 See the [FTW Evaluation Guide](./EVALUATION.md) for pixel, field-instance,
 boundary, and Delineate Anything test-set evaluation. It documents the exact
 field-matching rule, metric breakdown, output tables, and Rivanna commands.
+
+### Reproducible evaluation setup
+
+Python 3.12 or newer is required. A new user can clone and install the complete
+evaluation environment with standard Python tooling:
+
+```bash
+git clone https://github.com/Nibir088/Field_Boundary_Detection.git
+cd Field_Boundary_Detection
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On Windows, activate with `.venv\Scripts\activate` instead. The requirements
+file installs this repository in editable mode with the optional Ultralytics
+dependency required by all Delineate Anything variants.
+
+The equivalent, faster `uv` setup is:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv sync --extra delineate-anything
+```
+
+Verify the installation before starting a long evaluation:
+
+```bash
+python -c "import torch, ultralytics; print(torch.__version__, ultralytics.__version__)"
+python -c "from ftw_tools.inference.models import DelineateAnything; print('FTW ready')"
+```
+
+Download the FTW data if it is not already available:
+
+```bash
+ftw data download --countries=all --out=/path/to/ftw_data
+```
+
+Then evaluate a Delineate Anything checkpoint on every downloaded country's
+predefined test split:
+
+```bash
+python evaluate_delineate_anything.py \
+  --model DelineateAnythingV2 \
+  --data-dir /path/to/ftw_data/ftw \
+  --output-dir /path/to/results/delineate_v2 \
+  --window window_b \
+  --gpu 0
+```
+
+The model is downloaded automatically when it is not found in the default model
+directory. To avoid network access during evaluation, supply a downloaded file
+with `--model-path /path/to/DelineateAnythingV2.pt`. Set `--gpu -1` for CPU;
+GPU execution is strongly recommended for the full test set.
+
+If a run reports no predictions for a chip, that is valid: all reference fields
+on that chip are counted as false negatives and evaluation continues. Results
+include per-country and combined object detection, AP/mAP, matched-field IoU,
+merge/split, per-field, and derived-boundary CSV files.
+
+On Rivanna, load the Python module before the same setup commands:
+
+```bash
+module purge
+module load miniforge/24.11.3-py3.12
+source .Field_Boundary/bin/activate
+python -m pip install -r requirements.txt
+python evaluate_delineate_anything.py
+```
 
 ## Notes
 

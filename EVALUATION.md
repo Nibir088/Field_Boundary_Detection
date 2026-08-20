@@ -290,7 +290,10 @@ module purge
 module load miniforge/24.11.3-py3.12
 source .Field_Boundary/bin/activate
 
-uv run python evaluate_delineate_anything.py \
+# Run once after cloning or whenever the dependency files change.
+uv sync --extra delineate-anything
+
+uv run --extra delineate-anything python evaluate_delineate_anything.py \
   --model DelineateAnythingV2 \
   --window window_b \
   --gpu 0 \
@@ -311,7 +314,7 @@ Ultralytics cache behavior are used. An explicit checkpoint always takes
 precedence:
 
 ```bash
-uv run python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python evaluate_delineate_anything.py \
   --model DelineateAnything \
   --model-path /sfs/weka/scratch/$USER/ftw_models/DelineateAnything.pt \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
@@ -320,15 +323,15 @@ uv run python evaluate_delineate_anything.py \
 To compare all variants, run each in a distinct output directory:
 
 ```bash
-uv run python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python evaluate_delineate_anything.py \
   --model DelineateAnything-S \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_s
 
-uv run python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python evaluate_delineate_anything.py \
   --model DelineateAnything \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
 
-uv run python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python evaluate_delineate_anything.py \
   --model DelineateAnythingV2 \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v2
 ```

@@ -226,7 +226,6 @@ class DelineateAnything:
             max_det=self.max_detections,
             iou=self.iou_threshold,
             device=self.device,
-            half=False,
             verbose=False,
         )
         # Rescale masks and boxes to original patch size

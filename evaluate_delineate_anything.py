@@ -82,7 +82,12 @@ def build_arrays_from_masks(
     gt_areas = np.asarray(
         [np.count_nonzero(instance_mask == gt_id) for gt_id in gt_ids], dtype=np.int64
     )
-    prediction_areas = prediction_masks.reshape(len(prediction_masks), -1).sum(axis=1)
+    if len(prediction_masks):
+        prediction_areas = prediction_masks.reshape(len(prediction_masks), -1).sum(
+            axis=1
+        )
+    else:
+        prediction_areas = np.zeros(0, dtype=np.int64)
     intersections = np.zeros((len(gt_ids), len(prediction_masks)), dtype=np.int64)
     for gt_index, gt_id in enumerate(gt_ids):
         gt_mask = instance_mask == gt_id
@@ -331,15 +336,24 @@ def main() -> None:
             raise SystemExit(f"Model file not found: {model_path}")
         DelineateAnything.checkpoints[args.model] = str(model_path)
 
-    model = DelineateAnything(
-        model=args.model,
-        patch_size=256,
-        resize_factor=args.resize_factor,
-        max_detections=args.max_detections,
-        iou_threshold=args.nms_iou_threshold,
-        conf_threshold=args.conf_threshold,
-        device=device,
-    )
+    try:
+        model = DelineateAnything(
+            model=args.model,
+            patch_size=256,
+            resize_factor=args.resize_factor,
+            max_detections=args.max_detections,
+            iou_threshold=args.nms_iou_threshold,
+            conf_threshold=args.conf_threshold,
+            device=device,
+        )
+    except ModuleNotFoundError as error:
+        if error.name == "ultralytics":
+            raise SystemExit(
+                "Missing Delineate Anything dependencies. Install them with "
+                "`python -m pip install -r requirements.txt` or run "
+                "`uv sync --extra delineate-anything`."
+            ) from error
+        raise
     output_dir.mkdir(parents=True, exist_ok=True)
     temporal_option = "windowA" if args.window == "window_a" else "windowB"
 
