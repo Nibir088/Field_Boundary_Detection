@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ftw-test
-#SBATCH --account=YOUR_ALLOCATION
+#SBATCH --account=nssac_students
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
