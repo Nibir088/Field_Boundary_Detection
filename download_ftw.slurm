@@ -13,13 +13,15 @@
 
 set -euo pipefail
 
-REPO_DIR="/scratch/${USER}/Field_Boundary_Detection"
+REPO_DIR="/sfs/gpfs/tardis/project/bii_nssac/people/wyr6fx/Field_Boundary_Detection"
 DATA_DIR="/scratch/${USER}/ftw_data"
 
 module purge
 module load miniforge/24.11.3-py3.12
 
 cd "${REPO_DIR}"
+
+
 source .Field_Boundary/bin/activate
 
 mkdir -p "${DATA_DIR}"
@@ -33,4 +35,3 @@ uv run ftw data download \
     --out="${DATA_DIR}"
 
 echo "Download completed: $(date)"
-du -sh "${DATA_DIR}"
