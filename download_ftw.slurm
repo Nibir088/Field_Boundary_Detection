@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=ftw-download
-#SBATCH --account=YOUR_ALLOCATION
+#SBATCH --account=nssac_students
 #SBATCH --partition=standard
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=16G
+#SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=ftw-download-%j.out
 #SBATCH --error=ftw-download-%j.err
