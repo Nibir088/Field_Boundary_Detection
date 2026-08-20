@@ -1,0 +1,255 @@
+# FTW Evaluation Guide
+
+This project provides two complementary evaluators:
+
+- `evaluate_all_countries.py` reports semantic pixel metrics and a lightweight
+  connected-component object summary.
+- `evaluate_instance_boundaries.py` is the rigorous field-level evaluator. It
+  uses FTW instance-ID masks as the reference and separately measures field
+  detection, field shape, merges/splits, and boundary quality.
+
+## Evaluation reference
+
+The rigorous evaluator does not use a point, centroid, or bounding box as its
+reference. Each reference field is the complete ground-truth instance stored in:
+
+```text
+label_masks/instance/<chip_id>.tif
+```
+
+Every nonzero raster value is a ground-truth field ID. Instance identities are
+authoritative, while comparison geometry is restricted to pixels labeled class
+1 in the semantic mask. This is a like-for-like comparison with the repository's
+polygonization behavior, which treats class-1 interiors as field objects and
+class-2 boundaries as separators. Predictions are produced by the native
+three-class model:
+
+```text
+0 = background
+1 = field interior
+2 = field boundary
+3 = unknown/nodata in the ground truth (ignored)
+```
+
+Predicted fields are the 4-connected components of class 1. The predicted
+boundary class separates neighboring interiors, so each connected interior is a
+candidate field object.
+
+## Field matching
+
+For every ground-truth field `G` and predicted field `P`, mask IoU is:
+
+```text
+IoU(G, P) = area(G intersect P) / area(G union P)
+```
+
+The evaluator builds the complete ground-truth-by-prediction IoU matrix for each
+chip. It then performs maximum-cardinality, maximum-IoU bipartite assignment.
+This enforces:
+
+- one prediction can match at most one ground-truth field;
+- one ground-truth field can match at most one prediction;
+- the number of valid matches is maximized first;
+- total IoU is maximized among assignments with that match count.
+
+Results are reported at IoU thresholds 0.25, 0.50, and 0.75:
+
+| Threshold | Practical interpretation |
+|---|---|
+| 0.25 | Approximate localization |
+| 0.50 | Standard successful field detection |
+| 0.75 | Accurate field delineation |
+
+The threshold is always part of the definition of a correct detection. A field
+with best IoU 0.31 is detected at IoU 0.25 but missed at IoU 0.50 and 0.75.
+
+## Field detection metrics
+
+For a selected IoU threshold:
+
+```text
+TP = one-to-one matched fields meeting the IoU threshold
+FP = predicted fields without a valid match
+FN = ground-truth fields without a valid match
+
+Object precision = TP / (TP + FP)
+Object recall    = TP / (TP + FN)
+Object F1        = 2 * precision * recall / (precision + recall)
+```
+
+These support statements such as:
+
+```text
+800 known fields were detected correctly at IoU >= 0.50.
+200 known fields were missed.
+150 predictions were unmatched or insufficiently overlapping.
+```
+
+The evaluator also reports ground-truth count, prediction count, and signed
+count error:
+
+```text
+count error = predicted objects - ground-truth objects
+```
+
+## Field shape and panoptic metrics
+
+For correctly matched fields, the evaluator reports mean and median mask IoU.
+It also reports:
+
+```text
+SQ = sum of matched IoUs / TP
+RQ = TP / (TP + 0.5 FP + 0.5 FN)
+PQ = sum of matched IoUs / (TP + 0.5 FP + 0.5 FN)
+PQ = SQ * RQ
+```
+
+- Segmentation Quality (SQ) measures the shape quality of matched fields.
+- Recognition Quality (RQ) measures whether fields were found without misses or
+  spurious detections. Under one-to-one matching, RQ equals object F1.
+- Panoptic Quality (PQ) combines detection and delineation quality.
+
+A high SQ with low RQ means detected fields have good shapes, but many fields
+are missed or spuriously predicted. A low SQ with high RQ means most fields are
+found, but their shapes are inaccurate.
+
+## Per-field tables
+
+At the primary IoU threshold of 0.50, the evaluator writes a ground-truth-first
+table:
+
+```text
+ground_truth_field_matches_iou50.csv
+```
+
+Important columns are:
+
+| Column | Meaning |
+|---|---|
+| `gt_field_id` | Original instance ID from the FTW mask |
+| `best_prediction_id` | Prediction having the largest IoU, even below 0.50 |
+| `best_iou` | Best overlap available; zero when there is no overlap |
+| `matched_prediction_id_iou50` | One-to-one assigned prediction at IoU >= 0.50 |
+| `matched_iou_iou50` | Assigned IoU, or zero if missed |
+| `detected_iou50` | Whether the field is a TP at IoU >= 0.50 |
+
+The prediction-first table is:
+
+```text
+prediction_field_matches_iou50.csv
+```
+
+It distinguishes correct predictions from false or insufficiently overlapping
+predictions. Numeric IoU is retained; subjective labels such as "excellent" or
+"poor" are not assigned.
+
+## Merge and split errors
+
+A merge occurs when one predicted component substantially overlaps at least two
+ground-truth fields. A split occurs when one ground-truth field substantially
+overlaps at least two predictions.
+
+The association test uses overlap coefficient:
+
+```text
+intersection / min(ground-truth area, prediction area) >= 0.10
+```
+
+The threshold can be changed with `--association-threshold`. Merge and split
+counts explain topology failures that pixel IoU can hide.
+
+## Boundary metrics
+
+Boundary pixels are evaluated separately from field objects. A connected
+boundary network is not treated as an agricultural object because boundaries
+branch, intersect, and are shared between neighboring fields.
+
+For every chip, the evaluator reports:
+
+- exact boundary IoU, precision, recall, and F1;
+- boundary precision, recall, and F1 within a 1-pixel tolerance;
+- boundary precision, recall, and F1 within a 2-pixel tolerance;
+- average symmetric boundary distance in pixels;
+- symmetric 95th-percentile Hausdorff distance in pixels.
+
+FTW uses 10 m Sentinel-2 pixels, so one and two pixels correspond approximately
+to 10 m and 20 m. Tolerant boundary F1 is important because an edge shifted by
+one pixel may have almost no exact overlap while still being geographically
+close.
+
+Boundary CSV summaries are chip-macro averages: every chip contributes equally.
+The per-chip CSV is retained for distributions and further statistical analysis.
+
+## Presence-only labels
+
+Belgium has presence/absence labels, so background and false-positive metrics
+are meaningful. Rwanda is presence-only: outside known polygons, class 3 marks
+unknown pixels that are excluded from evaluation.
+
+Even after excluding unknown pixels, Rwanda precision must be interpreted with
+caution near incomplete annotations. Recall on known fields and matched-field
+shape metrics are generally more defensible than treating every unmatched
+prediction as evidence of a nonexistent field.
+
+## Running on Rivanna Open OnDemand
+
+Start an Open OnDemand session with one GPU, open a terminal, and run:
+
+```bash
+cd /path/to/Field_Boundary_Detection
+module purge
+module load miniforge/24.11.3-py3.12
+source .Field_Boundary/bin/activate
+
+uv run python evaluate_instance_boundaries.py
+```
+
+Default paths are:
+
+```text
+Dataset: /sfs/weka/scratch/$USER/ftw_data/ftw
+Model:   /sfs/weka/scratch/$USER/ftw_models/FTW_PRUE_EFNET_B5.ckpt
+Output:  /sfs/weka/scratch/$USER/ftw_results/instance_job_<job-or-time-id>
+```
+
+Custom paths can be supplied:
+
+```bash
+uv run python evaluate_instance_boundaries.py \
+  --data-dir /path/to/ftw \
+  --model /path/to/model.ckpt \
+  --output-dir /path/to/results \
+  --gpu 0 \
+  --batch-size 32 \
+  --num-workers 4
+```
+
+## Output files
+
+| File | Contents |
+|---|---|
+| `object_summary_by_threshold.csv` | Country and combined TP/FP/FN, detection, IoU, SQ/RQ/PQ, counts, merges, and splits at 0.25/0.50/0.75 |
+| `ground_truth_field_matches_iou50.csv` | One row per known field, including best and assigned IoU |
+| `prediction_field_matches_iou50.csv` | One row per predicted field, including best and assigned IoU |
+| `boundary_metrics_by_chip.csv` | Exact, tolerant, and distance boundary metrics for each chip |
+| `boundary_summary.csv` | Country and combined macro-average boundary results |
+
+## Recommended presentation
+
+For every country and combined, present:
+
+```text
+Known fields, predicted fields, count error
+TP, FP, FN at IoU >= 0.50
+Object precision, recall, and F1 at IoU >= 0.50
+Mean and median matched-field IoU
+Detection rates at IoU >= 0.25, 0.50, and 0.75
+SQ, RQ, and PQ
+Merge and split counts
+Exact boundary F1
+Boundary F1 at 1-pixel and 2-pixel tolerance
+Average symmetric boundary distance and Hausdorff-95
+```
+
+Always state the matching threshold, boundary tolerance, reference label type,
+and whether country results are pooled or macro-averaged.
