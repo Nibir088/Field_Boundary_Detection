@@ -20,7 +20,7 @@ module purge
 module load miniforge/24.11.3-py3.12
 
 cd "${REPO_DIR}"
-source .venv/bin/activate
+source .Field_Boundary/bin/activate
 
 mkdir -p "${DATA_DIR}"
 
