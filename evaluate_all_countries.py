@@ -14,18 +14,19 @@ Pixels with ground-truth value 3 (unknown/nodata) are ignored.
 import argparse
 import csv
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from einops import rearrange
+from scipy import ndimage
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ftw_tools.training.datasets import FTW
-from ftw_tools.training.metrics import get_object_level_metrics
 from ftw_tools.training.trainers import CustomSemanticSegmentationTask
 
 
@@ -75,6 +76,9 @@ class EvaluationCounts:
     object_tp: int = 0
     object_fp: int = 0
     object_fn: int = 0
+    matched_object_ious: list[float] = field(default_factory=list)
+    ground_truth_objects: int = 0
+    predicted_objects: int = 0
     samples: int = 0
 
     @classmethod
@@ -86,6 +90,9 @@ class EvaluationCounts:
         self.object_tp += other.object_tp
         self.object_fp += other.object_fp
         self.object_fn += other.object_fn
+        self.matched_object_ious.extend(other.matched_object_ious)
+        self.ground_truth_objects += other.ground_truth_objects
+        self.predicted_objects += other.predicted_objects
         self.samples += other.samples
 
 
@@ -167,6 +174,89 @@ def model_outputs(
         return model(images).argmax(dim=1)
 
 
+@dataclass
+class ObjectMatchResult:
+    """One-to-one connected-object matching results for one image."""
+
+    true_positive: int
+    false_positive: int
+    false_negative: int
+    matched_ious: list[float]
+    ground_truth_count: int
+    predicted_count: int
+
+
+def match_objects(
+    target: np.ndarray, prediction: np.ndarray, iou_threshold: float
+) -> ObjectMatchResult:
+    """Match 4-connected binary objects one-to-one by descending mask IoU."""
+    connectivity = ndimage.generate_binary_structure(2, 1)
+    target_labels, target_count = ndimage.label(target.astype(bool), connectivity)
+    prediction_labels, prediction_count = ndimage.label(
+        prediction.astype(bool), connectivity
+    )
+
+    if target_count == 0 or prediction_count == 0:
+        return ObjectMatchResult(
+            true_positive=0,
+            false_positive=prediction_count,
+            false_negative=target_count,
+            matched_ious=[],
+            ground_truth_count=target_count,
+            predicted_count=prediction_count,
+        )
+
+    stride = prediction_count + 1
+    intersections = np.bincount(
+        (target_labels.ravel() * stride + prediction_labels.ravel()),
+        minlength=(target_count + 1) * stride,
+    ).reshape(target_count + 1, stride)
+    target_areas = np.bincount(target_labels.ravel(), minlength=target_count + 1)
+    prediction_areas = np.bincount(
+        prediction_labels.ravel(), minlength=prediction_count + 1
+    )
+
+    candidate_target, candidate_prediction = np.nonzero(intersections[1:, 1:])
+    candidate_target += 1
+    candidate_prediction += 1
+    candidate_intersections = intersections[
+        candidate_target, candidate_prediction
+    ].astype(float)
+    candidate_unions = (
+        target_areas[candidate_target]
+        + prediction_areas[candidate_prediction]
+        - candidate_intersections
+    )
+    candidate_ious = candidate_intersections / candidate_unions
+
+    order = np.argsort(candidate_ious)[::-1]
+    used_targets: set[int] = set()
+    used_predictions: set[int] = set()
+    matched_ious = []
+
+    for candidate_index in order:
+        iou = float(candidate_ious[candidate_index])
+        if iou < iou_threshold:
+            break
+        target_id = int(candidate_target[candidate_index])
+        prediction_id = int(candidate_prediction[candidate_index])
+        if target_id in used_targets or prediction_id in used_predictions:
+            continue
+        used_targets.add(target_id)
+        used_predictions.add(prediction_id)
+        matched_ious.append(iou)
+
+    true_positive = len(matched_ious)
+    return ObjectMatchResult(
+        true_positive=true_positive,
+        false_positive=prediction_count - true_positive,
+        false_negative=target_count - true_positive,
+        matched_ious=matched_ious,
+        ground_truth_count=target_count,
+        predicted_count=prediction_count,
+    )
+
+
 def evaluate_country(
     country: str,
     data_dir: Path,
@@ -215,12 +305,17 @@ def evaluate_country(
             target = target.copy()
             prediction[~valid] = 0
             target[~valid] = 0
-            true_positive, false_positive, false_negative = get_object_level_metrics(
-                target, prediction, iou_threshold=iou_threshold
+            object_result = match_objects(
+                target=target,
+                prediction=prediction,
+                iou_threshold=iou_threshold,
             )
-            counts.object_tp += true_positive
-            counts.object_fp += false_positive
-            counts.object_fn += false_negative
+            counts.object_tp += object_result.true_positive
+            counts.object_fp += object_result.false_positive
+            counts.object_fn += object_result.false_negative
+            counts.matched_object_ious.extend(object_result.matched_ious)
+            counts.ground_truth_objects += object_result.ground_truth_count
+            counts.predicted_objects += object_result.predicted_count
 
         counts.samples += len(targets)
 
@@ -249,7 +344,7 @@ def metric_rows(scope: str, counts: EvaluationCounts) -> list[dict]:
 
 
 def summary_row(scope: str, counts: EvaluationCounts, metric_rows: list[dict]) -> dict:
-    """Create macro pixel metrics and standard object metrics for one scope."""
+    """Create macro pixel, object-detection, and panoptic metrics for one scope."""
     native_rows = [
         row
         for row in metric_rows
@@ -262,6 +357,20 @@ def summary_row(scope: str, counts: EvaluationCounts, metric_rows: list[dict]) -
     object_f1 = safe_divide(
         2 * object_precision * object_recall, object_precision + object_recall
     )
+    matched_ious = np.asarray(counts.matched_object_ious, dtype=float)
+    sum_matched_iou = float(matched_ious.sum())
+    mean_matched_iou = (
+        float(matched_ious.mean()) if len(matched_ious) else float("nan")
+    )
+    median_matched_iou = (
+        float(np.median(matched_ious)) if len(matched_ious) else float("nan")
+    )
+    panoptic_denominator = (
+        counts.object_tp + 0.5 * counts.object_fp + 0.5 * counts.object_fn
+    )
+    segmentation_quality = safe_divide(sum_matched_iou, counts.object_tp)
+    recognition_quality = safe_divide(counts.object_tp, panoptic_denominator)
+    panoptic_quality = safe_divide(sum_matched_iou, panoptic_denominator)
     return {
         "scope": scope,
         "samples": counts.samples,
@@ -272,6 +381,17 @@ def summary_row(scope: str, counts: EvaluationCounts, metric_rows: list[dict]) -
         "standard_object_precision": object_precision,
         "standard_object_recall": object_recall,
         "standard_object_f1": object_f1,
+        "object_true_positives": counts.object_tp,
+        "object_false_positives": counts.object_fp,
+        "object_false_negatives": counts.object_fn,
+        "ground_truth_object_count": counts.ground_truth_objects,
+        "predicted_object_count": counts.predicted_objects,
+        "object_count_error": counts.predicted_objects - counts.ground_truth_objects,
+        "mean_matched_object_iou": mean_matched_iou,
+        "median_matched_object_iou": median_matched_iou,
+        "segmentation_quality_sq": segmentation_quality,
+        "recognition_quality_rq": recognition_quality,
+        "panoptic_quality_pq": panoptic_quality,
     }
 
 
@@ -359,8 +479,18 @@ def main() -> None:
 
     metrics_frame = pd.DataFrame(metrics)
     summary_frame = pd.DataFrame(summaries)
+    object_matches_frame = pd.DataFrame.from_records(
+        [
+            {"scope": scope, "matched_object_id": index, "iou": iou}
+            for scope, counts in counts_by_scope.items()
+            if scope != "all_countries"
+            for index, iou in enumerate(counts.matched_object_ious, start=1)
+        ],
+        columns=["scope", "matched_object_id", "iou"],
+    )
     metrics_frame.to_csv(output_dir / "classwise_metrics.csv", index=False)
     summary_frame.to_csv(output_dir / "summary_metrics.csv", index=False)
+    object_matches_frame.to_csv(output_dir / "matched_object_ious.csv", index=False)
 
     print("\nCombined classwise metrics")
     print(
