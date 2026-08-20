@@ -740,6 +740,12 @@ We have also made FTW model checkpoints available that are pretrained only on CC
 
 For details on the experimentation process, see [Experimentation section](./EXPERIMENTS.md).
 
+## Evaluation
+
+See the [FTW Evaluation Guide](./EVALUATION.md) for pixel, field-instance,
+boundary, and Delineate Anything test-set evaluation. It documents the exact
+field-matching rule, metric breakdown, output tables, and Rivanna commands.
+
 ## Notes
 
 If you see any warnings in this format:

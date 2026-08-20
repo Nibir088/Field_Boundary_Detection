@@ -1,12 +1,15 @@
 # FTW Evaluation Guide
 
-This project provides two complementary evaluators:
+This project provides three complementary evaluators:
 
 - `evaluate_all_countries.py` reports semantic pixel metrics and a lightweight
   connected-component object summary.
 - `evaluate_instance_boundaries.py` is the rigorous field-level evaluator. It
   uses FTW instance-ID masks as the reference and separately measures field
   detection, field shape, merges/splits, and boundary quality.
+- `evaluate_delineate_anything.py` applies the same field-level definitions to
+  the native instance masks produced by Delineate Anything and also reports
+  confidence-ranked AP50 and mAP50:95.
 
 ## Evaluation reference
 
@@ -253,3 +256,138 @@ Average symmetric boundary distance and Hausdorff-95
 
 Always state the matching threshold, boundary tolerance, reference label type,
 and whether country results are pooled or macro-averaged.
+
+## Delineate Anything evaluation
+
+The FTW command-line interface can run Delineate Anything inference, but it does
+not provide the detailed FTW test-set breakdown described above. Use
+`evaluate_delineate_anything.py` to evaluate any of the three registered
+variants:
+
+- `DelineateAnything-S`: smaller version 1 model;
+- `DelineateAnything`: standard version 1 model;
+- `DelineateAnythingV2`: standard version 2 model.
+
+Unlike the PRUE semantic model, Delineate Anything directly predicts a set of
+possibly overlapping field masks with a confidence score for each mask. The
+evaluator preserves these native instances instead of converting their union
+into connected components. It uses the complete nonzero shapes in
+`label_masks/instance/<chip_id>.tif` as the ground-truth fields and ignores only
+class-3 unknown/nodata pixels from the semantic mask.
+
+The model accepts one temporal window and uses its first three RGB channels.
+Choose `--window window_a` or `--window window_b`; the default is `window_b`.
+This is an input difference from the default PRUE model, which uses both
+temporal windows. Report the selected window in every comparison.
+
+### Run interactively on a Rivanna GPU
+
+In an Open OnDemand GPU session:
+
+```bash
+cd /path/to/Field_Boundary_Detection
+module purge
+module load miniforge/24.11.3-py3.12
+source .Field_Boundary/bin/activate
+
+uv run python evaluate_delineate_anything.py \
+  --model DelineateAnythingV2 \
+  --window window_b \
+  --gpu 0 \
+  --batch-size 16
+```
+
+The defaults use these Rivanna locations:
+
+```text
+Dataset: /sfs/weka/scratch/$USER/ftw_data/ftw
+Models:  /sfs/weka/scratch/$USER/ftw_models
+Output:  /sfs/weka/scratch/$USER/ftw_results/delineate_job_<job-or-time-id>
+```
+
+If the selected checkpoint exists in the models directory under its expected
+name, it is loaded locally. Otherwise, the registered model URL and normal
+Ultralytics cache behavior are used. An explicit checkpoint always takes
+precedence:
+
+```bash
+uv run python evaluate_delineate_anything.py \
+  --model DelineateAnything \
+  --model-path /sfs/weka/scratch/$USER/ftw_models/DelineateAnything.pt \
+  --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
+```
+
+To compare all variants, run each in a distinct output directory:
+
+```bash
+uv run python evaluate_delineate_anything.py \
+  --model DelineateAnything-S \
+  --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_s
+
+uv run python evaluate_delineate_anything.py \
+  --model DelineateAnything \
+  --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
+
+uv run python evaluate_delineate_anything.py \
+  --model DelineateAnythingV2 \
+  --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v2
+```
+
+### Delineate Anything metric breakdown
+
+The evaluator reports two related field-detection views.
+
+The fixed-threshold view uses the same maximum-cardinality, maximum-IoU
+one-to-one assignment described in [Field matching](#field-matching). It reports
+TP, FP, FN, object precision, recall, F1, matched-mask IoU, SQ, RQ, and PQ at IoU
+0.25, 0.50, and 0.75. The per-field tables retain the best numeric IoU even
+when a field fails the IoU 0.50 detection rule.
+
+The ranking view sorts predictions by model confidence. At every IoU threshold,
+each prediction greedily claims its best unmatched ground-truth field on the
+same chip. It reports:
+
+```text
+AP50       = 101-point interpolated average precision at IoU >= 0.50
+mAP50:95   = mean AP over IoU 0.50, 0.55, ..., 0.95
+```
+
+AP50 emphasizes whether fields are detected. mAP50:95 is stricter because high
+IoU thresholds require accurate shapes. These values are computed from
+predictions retained after `--conf-threshold`; keep that threshold low, and
+constant across models, for a meaningful precision-recall curve. The default is
+0.05. `--max-detections` defaults to 300 so chips containing many fields are
+less likely to be artificially truncated.
+
+Merge and split counts use the same 0.10 overlap-coefficient association rule as
+the semantic evaluator. The evaluator also compares the union of one-pixel
+inner edges of predicted instance masks to the FTW semantic boundary class.
+Delineate Anything has no separately predicted boundary class, so this boundary
+score measures boundaries derived from its field masks and is not identical in
+meaning to PRUE's native class-2 boundary score.
+
+### Delineate Anything output files
+
+| File | Contents |
+|---|---|
+| `object_summary_by_threshold.csv` | Per-country and pooled counts, TP/FP/FN, precision/recall/F1, matched IoU, SQ/RQ/PQ, merges, and splits |
+| `average_precision_summary.csv` | Per-country and pooled AP50, AP50:95 components, and mAP50:95 |
+| `ground_truth_field_matches_iou50.csv` | Every known field, its best IoU, assigned prediction, and detected/missed result |
+| `prediction_field_matches_iou50.csv` | Every prediction, confidence, best IoU, assigned field, and correct/incorrect result |
+| `boundary_metrics_by_chip.csv` | Exact, tolerant, and distance-based boundary metrics for every chip |
+| `boundary_summary.csv` | Per-country and combined chip-macro boundary averages |
+| `run_settings.csv` | Model, checkpoint source, temporal window, and inference thresholds |
+
+### Fair comparison and parameter selection
+
+Use identical FTW countries, the predefined `test` split, valid-pixel masking,
+and IoU thresholds for all models. Compare fixed-IoU object metrics directly;
+compare AP only when predictions from every model have confidence scores and use
+the same AP procedure. State that Delineate Anything uses one RGB window while
+the default PRUE model uses two four-band windows.
+
+Do not select the temporal window, confidence threshold, NMS threshold, resize
+factor, or maximum detections by looking at test performance. Select them on the
+validation split, freeze them, and then run the test evaluator once. Rwanda is
+presence-only, so its unmatched-prediction precision and AP remain less certain
+than recall and matched-field shape quality, as described above.
