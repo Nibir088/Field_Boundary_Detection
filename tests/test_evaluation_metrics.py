@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from evaluation import metrics
+from evaluation import confidence, metrics
 
 
 def test_unknown_region_does_not_split_prediction_component():
@@ -58,3 +58,71 @@ def test_boundary_metrics_report_balanced_distance_and_metres():
     row = metrics.boundary_metrics(target, prediction, metres_per_pixel=10)
     assert row["asbd_balanced_px"] == 1
     assert row["asbd_balanced_m"] == 10
+
+
+def test_semantic_pixel_record_ignores_unknown_pixels():
+    semantic = np.array([[0, 1], [2, 3]])
+    prediction = np.array([[0, 1], [0, 0]])
+    record = metrics.semantic_pixel_record(
+        "belgium", "chip", semantic, prediction
+    )
+    assert record["native_3class"].sum() == 3
+    assert record["native_3class"].tolist() == [
+        [1, 0, 0],
+        [0, 1, 0],
+        [1, 0, 0],
+    ]
+
+
+def test_instance_pixel_record_uses_union_as_field_extent():
+    semantic = np.array([[0, 1], [2, 3]])
+    masks = np.array(
+        [
+            [[False, True], [False, False]],
+            [[False, False], [True, False]],
+        ]
+    )
+    record = metrics.instance_pixel_record("belgium", "chip", semantic, masks)
+    assert record["field_extent_binary"].tolist() == [[1, 0], [0, 2]]
+
+
+def test_probability_record_excludes_unknown_and_scores_perfect_prediction():
+    semantic = np.array([[0, 1], [2, 3]])
+    probabilities = np.full((3, 2, 2), 0.01, dtype=float)
+    probabilities[0, 0, 0] = 0.98
+    probabilities[1, 0, 1] = 0.98
+    probabilities[2, 1, 0] = 0.98
+    probabilities[:, 1, 1] = (0.2, 0.3, 0.5)
+    record = confidence.probability_chip_record(
+        "belgium", "chip", semantic, probabilities
+    )
+    assert record["pixels"] == 3
+    assert record["correct"] == 3
+    assert record["brier_sum"] < 0.01
+
+
+def test_topology_metrics_detect_component_count_error():
+    gt = np.array([[1, 0, 2]])
+    prediction = np.array([[1, 1, 1]])
+    row = metrics.topology_metrics(gt, prediction, np.ones_like(gt, dtype=bool))
+    assert row["gt_betti0"] == 2
+    assert row["prediction_betti0"] == 1
+    assert row["betti0_error"] == -1
+
+
+def test_exact_minimum_vertex_cut_finds_smallest_raster_separator():
+    component = np.ones((3, 5), dtype=bool)
+    source = np.zeros_like(component)
+    target = np.zeros_like(component)
+    source[:, 0] = True
+    target[:, -1] = True
+    cut, cost = metrics._minimum_vertex_cut(
+        component, source, target, np.ones(component.shape)
+    )
+    assert cut.sum() == 3
+    assert cost == 3
+    remaining = component & ~cut
+    labels, _ = metrics.ndimage.label(remaining, metrics.N4)
+    source_labels = set(labels[source]) - {0}
+    target_labels = set(labels[target]) - {0}
+    assert not source_labels & target_labels

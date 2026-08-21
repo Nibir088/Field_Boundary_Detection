@@ -792,7 +792,7 @@ Then evaluate a Delineate Anything checkpoint on every downloaded country's
 predefined test split:
 
 ```bash
-python evaluate_delineate_anything.py \
+python -m evaluation.delineate_anything \
   --model DelineateAnythingV2 \
   --data-dir /path/to/ftw_data/ftw \
   --output-dir /path/to/results/delineate_v2 \
@@ -805,6 +805,25 @@ The equivalent package entry points are preferred for new automation:
 ```bash
 python -m evaluation.delineate_anything --model DelineateAnythingV2
 python -m evaluation.instance_boundary --model /path/to/FTW_PRUE_EFNET_B5.ckpt
+```
+
+Both commands generate presentation figures under `RESULTS_DIR/plots`. Rebuild
+figures later without rerunning inference using:
+
+```bash
+python -m evaluation.plots --results-dir /path/to/results
+```
+
+Each test image also receives a multi-page report at
+`RESULTS_DIR/sample_pdfs/<country>/<image-file-stem>.pdf`, containing the image,
+ground truth, prediction, overlays, and all available per-chip metrics. Add
+`--skip-sample-pdfs` when these reports are not required.
+
+For Rivanna batch execution, edit `EVALUATOR` and the checkpoint paths in
+`evaluation/run_evaluation.slurm`, then submit from the repository root:
+
+```bash
+sbatch evaluation/run_evaluation.slurm
 ```
 
 Both use the canonical implementation in `evaluation/metrics.py`. See
@@ -829,7 +848,7 @@ module purge
 module load miniforge/24.11.3-py3.12
 source .Field_Boundary/bin/activate
 python -m pip install -r requirements.txt
-python evaluate_delineate_anything.py
+python -m evaluation.delineate_anything
 ```
 
 ## Notes

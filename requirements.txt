@@ -1,2 +1,2 @@
-# Project plus the optional dependency used by evaluate_delineate_anything.py.
+# Project plus the optional dependency used by evaluation.delineate_anything.
 -e .[delineate-anything]

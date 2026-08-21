@@ -11,9 +11,10 @@ import pandas as pd
 import rasterio
 import torch
 import torch.nn.functional as functional
+from scipy import ndimage
 from tqdm import tqdm
 
-from evaluation import metrics
+from evaluation import confidence, metrics
 from evaluation.metrics import (
     DEFAULT_THRESHOLDS,
     PRIMARY_THRESHOLD,
@@ -71,6 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--association-threshold", type=float, default=0.10)
     parser.add_argument("--metres-per-pixel", type=float, default=10.0)
     parser.add_argument("--geometry-epsilon-px", type=float, default=1.0)
+    parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument("--skip-sample-pdfs", action="store_true")
     return parser.parse_args()
 
 
@@ -376,6 +379,8 @@ def main() -> None:
     repair_rows = []
     detection_rows = []
     gt_counts: dict[str, int] = {}
+    pixel_records = []
+    topology_rows = []
 
     countries = sorted(path.parent.name for path in data_dir.glob("*/chips_*.parquet"))
     for country in countries:
@@ -412,11 +417,29 @@ def main() -> None:
                 arrays = metrics.mask_object_arrays(
                     semantic_target, instance_mask, masks
                 )
+                pixel_record = metrics.instance_pixel_record(
+                    country, chip_id, semantic_target, masks
+                )
+                pixel_records.append(pixel_record)
                 gt_counts[country] += len(arrays.gt_ids)
                 object_rows.extend(metrics.object_chip_rows(country, chip_id, arrays))
 
                 gt_interior = np.where(semantic_target == 1, instance_mask, 0)
                 gt_masks = [gt_interior == value for value in arrays.gt_ids]
+                predicted_union = (
+                    masks.any(axis=0)
+                    if len(masks)
+                    else np.zeros(semantic_target.shape, dtype=bool)
+                )
+                predicted_topology_labels, _ = ndimage.label(
+                    predicted_union, metrics.N4
+                )
+                topology_values = metrics.topology_metrics(
+                    gt_interior, predicted_topology_labels, valid
+                )
+                topology_rows.append(
+                    {"country": country, "chip_id": chip_id, **topology_values}
+                )
                 chip_geometry, excluded = metrics.geometry_pair_rows(
                     country,
                     chip_id,
@@ -435,11 +458,10 @@ def main() -> None:
                         epsilon=args.geometry_epsilon_px,
                     )
                 )
-                repair_rows.extend(
-                    metrics.merge_repair_rows(
-                        country, chip_id, arrays, gt_masks, list(masks)
-                    )
+                chip_repair_rows = metrics.merge_repair_rows(
+                    country, chip_id, arrays, gt_masks, list(masks)
                 )
+                repair_rows.extend(chip_repair_rows)
                 geometry_exclusions.append(
                     {"country": country, "chip_id": chip_id, **excluded}
                 )
@@ -447,7 +469,9 @@ def main() -> None:
                 append_match_tables(
                     country, chip_id, arrays, confidences, gt_rows, prediction_rows
                 )
-                for prediction_index, confidence in enumerate(confidences):
+                primary_matches = match_at_threshold(arrays, PRIMARY_THRESHOLD)
+                matched_predictions = {prediction for _, prediction in primary_matches}
+                for prediction_index, score in enumerate(confidences):
                     candidates = [
                         (
                             int(arrays.gt_ids[gt_index]),
@@ -461,22 +485,54 @@ def main() -> None:
                         {
                             "country": country,
                             "chip_id": chip_id,
-                            "confidence": float(confidence),
+                            "confidence": float(score),
+                            "native_confidence": float(score),
+                            "area_pixels": int(
+                                arrays.prediction_areas[prediction_index]
+                            ),
+                            "best_iou": (
+                                float(arrays.ious[:, prediction_index].max())
+                                if len(arrays.gt_ids)
+                                else 0.0
+                            ),
+                            "correct_iou50": prediction_index in matched_predictions,
                             "candidates": candidates,
                         }
                     )
 
-                boundary_rows.append(
-                    {
-                        "country": country,
-                        "chip_id": chip_id,
-                        **boundary_metrics(
-                            target=(semantic_target == 2) & valid,
-                            prediction=prediction_boundaries(masks) & valid,
-                            metres_per_pixel=args.metres_per_pixel,
-                        ),
-                    }
+                boundary_values = boundary_metrics(
+                    target=(semantic_target == 2) & valid,
+                    prediction=prediction_boundaries(masks) & valid,
+                    metres_per_pixel=args.metres_per_pixel,
                 )
+                boundary_rows.append(
+                    {"country": country, "chip_id": chip_id, **boundary_values}
+                )
+                if not args.skip_sample_pdfs:
+                    from evaluation.sample_reports import (
+                        chip_metric_values,
+                        save_instance_sample_pdf,
+                    )
+
+                    save_instance_sample_pdf(
+                        output_dir=output_dir,
+                        country=country,
+                        chip_id=chip_id,
+                        image=sample["image"].numpy(),
+                        semantic=semantic_target,
+                        instances=instance_mask,
+                        prediction_masks=masks,
+                        confidences=confidences,
+                        metric_values=chip_metric_values(
+                            arrays,
+                            boundary_values,
+                            pixel_record,
+                            chip_geometry,
+                            chip_repair_rows,
+                            confidences=confidences,
+                            topology=topology_values,
+                        ),
+                    )
 
     if not object_rows:
         raise SystemExit("No downloaded countries with usable test samples were found.")
@@ -488,6 +544,16 @@ def main() -> None:
         geometry_population_rows
     )
     repair_summary = metrics.aggregate_repair_rows(repair_rows)
+    pixel_summary, pixel_confusion = metrics.aggregate_pixel_records(pixel_records)
+    confidence_summary = confidence.confidence_reliability_summary(
+        detection_rows, ("native_confidence",)
+    )
+    risk_coverage, risk_summary = confidence.risk_coverage_rows(
+        detection_rows,
+        gt_counts,
+        ("native_confidence", "area_pixels"),
+    )
+    topology_summary = metrics.aggregate_macro_rows(topology_rows)
 
     object_summary.to_csv(output_dir / "object_summary_by_threshold.csv", index=False)
     ap_frame.to_csv(output_dir / "average_precision_summary.csv", index=False)
@@ -518,6 +584,23 @@ def main() -> None:
         output_dir / "merge_repair_distance.csv", index=False
     )
     repair_summary.to_csv(output_dir / "merge_repair_summary.csv", index=False)
+    pixel_summary.to_csv(output_dir / "pixel_metrics.csv", index=False)
+    pixel_confusion.to_csv(output_dir / "pixel_confusion.csv", index=False)
+    confidence_frame = pd.DataFrame(detection_rows)
+    if "candidates" in confidence_frame:
+        confidence_frame = confidence_frame.drop(columns="candidates")
+    confidence_frame.to_csv(
+        output_dir / "field_confidence_by_prediction.csv", index=False
+    )
+    confidence_summary.to_csv(
+        output_dir / "field_confidence_summary.csv", index=False
+    )
+    risk_coverage.to_csv(output_dir / "risk_coverage.csv", index=False)
+    risk_summary.to_csv(output_dir / "risk_coverage_summary.csv", index=False)
+    pd.DataFrame(topology_rows).to_csv(
+        output_dir / "topology_metrics_by_chip.csv", index=False
+    )
+    topology_summary.to_csv(output_dir / "topology_summary.csv", index=False)
 
     settings = pd.DataFrame(
         [
@@ -535,10 +618,17 @@ def main() -> None:
                 "association_alpha_sweep": "0.05,0.10,0.20,0.30",
                 "metres_per_pixel": args.metres_per_pixel,
                 "geometry_epsilon_px": args.geometry_epsilon_px,
+                "sample_pdfs": not args.skip_sample_pdfs,
+                "confidence_scores": "native_confidence,area_baseline",
+                "temperature_scaling": "not_applicable_no_pixel_logits",
             }
         ]
     )
     settings.to_csv(output_dir / "run_settings.csv", index=False)
+    if not args.skip_plots:
+        from evaluation.plots import create_plots
+
+        create_plots(output_dir)
     print("\nObject summary")
     print(object_summary.to_string(index=False))
     print("\nAverage precision")

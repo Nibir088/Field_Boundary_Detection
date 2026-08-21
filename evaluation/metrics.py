@@ -13,6 +13,8 @@ import pandas as pd
 from rasterio.features import shapes
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import maximum_flow
 from scipy.stats import wasserstein_distance
 from shapely.geometry import Point, shape
 
@@ -256,6 +258,142 @@ def binary_metrics(target: np.ndarray, prediction: np.ndarray) -> dict:
     }
 
 
+def confusion_matrix(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    classes: int,
+    valid: np.ndarray,
+) -> np.ndarray:
+    encoded = target[valid].astype(np.int64) * classes
+    encoded += prediction[valid].astype(np.int64)
+    return np.bincount(encoded, minlength=classes**2).reshape(classes, classes)
+
+
+def _class_rows(
+    scope: str,
+    view: str,
+    confusion: np.ndarray,
+    class_names: tuple[str, ...],
+    presence_only_warning: bool,
+) -> list[dict]:
+    rows = []
+    for index, class_name in enumerate(class_names):
+        tp = int(confusion[index, index])
+        fp = int(confusion[:, index].sum() - tp)
+        fn = int(confusion[index, :].sum() - tp)
+        precision = safe_divide(tp, tp + fp)
+        recall = safe_divide(tp, tp + fn)
+        rows.append(
+            {
+                "scope": scope,
+                "view": view,
+                "class": class_name,
+                "true_positive_pixels": tp,
+                "false_positive_pixels": fp,
+                "false_negative_pixels": fn,
+                "support_pixels": int(confusion[index, :].sum()),
+                "iou": safe_divide(tp, tp + fp + fn),
+                "precision": precision,
+                "recall": recall,
+                "f1": safe_divide(2 * precision * recall, precision + recall),
+                "presence_only_precision_warning": presence_only_warning,
+            }
+        )
+    return rows
+
+
+def semantic_pixel_record(
+    country: str, chip_id: str, semantic: np.ndarray, prediction: np.ndarray
+) -> dict:
+    valid = semantic != 3
+    native = confusion_matrix(semantic, prediction, 3, valid)
+    interior = confusion_matrix(
+        (semantic == 1).astype(np.uint8),
+        (prediction == 1).astype(np.uint8),
+        2,
+        valid,
+    )
+    extent = confusion_matrix(
+        np.isin(semantic, (1, 2)).astype(np.uint8),
+        np.isin(prediction, (1, 2)).astype(np.uint8),
+        2,
+        valid,
+    )
+    return {
+        "country": country,
+        "chip_id": chip_id,
+        "native_3class": native,
+        "interior_binary": interior,
+        "field_extent_binary": extent,
+    }
+
+
+def instance_pixel_record(
+    country: str,
+    chip_id: str,
+    semantic: np.ndarray,
+    prediction_masks: np.ndarray,
+) -> dict:
+    valid = semantic != 3
+    predicted_extent = (
+        prediction_masks.any(axis=0)
+        if len(prediction_masks)
+        else np.zeros(semantic.shape, dtype=bool)
+    )
+    extent = confusion_matrix(
+        np.isin(semantic, (1, 2)).astype(np.uint8),
+        predicted_extent.astype(np.uint8),
+        2,
+        valid,
+    )
+    return {
+        "country": country,
+        "chip_id": chip_id,
+        "field_extent_binary": extent,
+    }
+
+
+def aggregate_pixel_records(
+    records: list[dict],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    views = [key for key in records[0] if key not in {"country", "chip_id"}]
+    metric_rows, confusion_rows = [], []
+    countries = sorted({record["country"] for record in records})
+    class_names = {
+        "native_3class": ("background", "field_interior", "field_boundary"),
+        "interior_binary": ("not_interior", "field_interior"),
+        "field_extent_binary": ("non_field", "field_extent"),
+    }
+    for scope in countries + ["all_countries"]:
+        selected = (
+            records
+            if scope == "all_countries"
+            else [record for record in records if record["country"] == scope]
+        )
+        warning = any(
+            record["country"] not in FULL_DATA_COUNTRIES for record in selected
+        )
+        for view in views:
+            confusion = np.sum([record[view] for record in selected], axis=0)
+            metric_rows.extend(
+                _class_rows(
+                    scope, view, confusion, class_names[view], warning
+                )
+            )
+            for target_index, target_name in enumerate(class_names[view]):
+                for prediction_index, prediction_name in enumerate(class_names[view]):
+                    confusion_rows.append(
+                        {
+                            "scope": scope,
+                            "view": view,
+                            "target_class": target_name,
+                            "predicted_class": prediction_name,
+                            "pixels": int(confusion[target_index, prediction_index]),
+                        }
+                    )
+    return pd.DataFrame(metric_rows), pd.DataFrame(confusion_rows)
+
+
 def boundary_metrics(
     target: np.ndarray, prediction: np.ndarray, metres_per_pixel: float = 10.0
 ) -> dict:
@@ -289,6 +427,75 @@ def boundary_metrics(
     for key in ("asbd_pooled", "asbd_balanced", "hausdorff_95"):
         row[f"{key}_m"] = row[f"{key}_px"] * metres_per_pixel
     return row
+
+
+def _betti_numbers(mask: np.ndarray) -> tuple[int, int]:
+    components = int(ndimage.label(mask, N4)[1])
+    background_labels, background_count = ndimage.label(~mask, N4)
+    border_ids = np.unique(
+        np.concatenate(
+            (
+                background_labels[0],
+                background_labels[-1],
+                background_labels[:, 0],
+                background_labels[:, -1],
+            )
+        )
+    )
+    holes = sum(
+        label not in border_ids for label in range(1, background_count + 1)
+    )
+    return components, int(holes)
+
+
+def topology_metrics(
+    gt_labels: np.ndarray,
+    prediction_labels: np.ndarray,
+    valid: np.ndarray,
+) -> dict:
+    """Variation of information and foreground Betti-number errors."""
+    selected = valid & ((gt_labels != 0) | (prediction_labels != 0))
+    if selected.any():
+        gt_values = gt_labels[selected]
+        prediction_values = prediction_labels[selected]
+        gt_ids, gt_compact = np.unique(gt_values, return_inverse=True)
+        pred_ids, pred_compact = np.unique(prediction_values, return_inverse=True)
+        contingency = np.bincount(
+            gt_compact * len(pred_ids) + pred_compact,
+            minlength=len(gt_ids) * len(pred_ids),
+        ).reshape(len(gt_ids), len(pred_ids))
+        probability = contingency / contingency.sum()
+        p_gt = probability.sum(axis=1)
+        p_prediction = probability.sum(axis=0)
+        h_gt = -np.sum(p_gt[p_gt > 0] * np.log2(p_gt[p_gt > 0]))
+        h_prediction = -np.sum(
+            p_prediction[p_prediction > 0]
+            * np.log2(p_prediction[p_prediction > 0])
+        )
+        expected = p_gt[:, None] * p_prediction[None, :]
+        positive = probability > 0
+        mutual_information = np.sum(
+            probability[positive]
+            * np.log2(probability[positive] / expected[positive])
+        )
+        variation_information = float(
+            h_gt + h_prediction - 2 * mutual_information
+        )
+    else:
+        variation_information = float("nan")
+    gt_betti0, gt_betti1 = _betti_numbers((gt_labels != 0) & valid)
+    pred_betti0, pred_betti1 = _betti_numbers(
+        (prediction_labels != 0) & valid
+    )
+    return {
+        "variation_of_information_bits": variation_information,
+        "gt_betti0": gt_betti0,
+        "prediction_betti0": pred_betti0,
+        "betti0_error": pred_betti0 - gt_betti0,
+        "gt_betti1": gt_betti1,
+        "prediction_betti1": pred_betti1,
+        "betti1_error": pred_betti1 - gt_betti1,
+    }
 
 
 def aggregate_macro_rows(chip_rows: list[dict]) -> pd.DataFrame:
@@ -483,29 +690,103 @@ def aggregate_geometry_population(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(output)
 
 
-def _grid_shortest_path(mask: np.ndarray, source: np.ndarray, target: np.ndarray) -> float:
-    starts = [tuple(value) for value in np.argwhere(mask & source)]
-    destinations = {tuple(value) for value in np.argwhere(mask & target)}
-    if not starts or not destinations:
-        return float("nan")
-    queue = deque((value, 0) for value in starts)
-    visited = set(starts)
-    height, width = mask.shape
-    while queue:
-        (row, column), distance = queue.popleft()
-        if (row, column) in destinations:
-            return float(distance)
+def _terminal_core(field: np.ndarray, component: np.ndarray) -> np.ndarray:
+    overlap = field & component
+    eroded = ndimage.binary_erosion(overlap, N4, iterations=1)
+    return eroded if eroded.any() else overlap
+
+
+def _minimum_vertex_cut(
+    component: np.ndarray,
+    source_field: np.ndarray,
+    target_field: np.ndarray,
+    node_cost: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Exact pairwise minimum node cut using node splitting and max flow."""
+    source_core = _terminal_core(source_field, component)
+    target_core = _terminal_core(target_field, component)
+    output = np.zeros(component.shape, dtype=bool)
+    if not source_core.any() or not target_core.any():
+        return output, float("nan")
+
+    relevant = component | source_core | target_core
+    coordinates = np.argwhere(relevant)
+    row_min, column_min = coordinates.min(axis=0)
+    row_max, column_max = coordinates.max(axis=0) + 1
+    crop = relevant[row_min:row_max, column_min:column_max]
+    source_crop = source_core[row_min:row_max, column_min:column_max]
+    target_crop = target_core[row_min:row_max, column_min:column_max]
+    cost_crop = node_cost[row_min:row_max, column_min:column_max]
+
+    pixel_coordinates = np.argwhere(crop)
+    pixel_count = len(pixel_coordinates)
+    pixel_index = np.full(crop.shape, -1, dtype=np.int64)
+    pixel_index[crop] = np.arange(pixel_count)
+    source_node, target_node = 2 * pixel_count, 2 * pixel_count + 1
+    graph_nodes = 2 * pixel_count + 2
+    finite_costs = np.maximum(1, np.rint(cost_crop[crop]).astype(np.int64))
+    infinite = int(finite_costs.sum()) + 1
+
+    rows: list[int] = []
+    columns: list[int] = []
+    capacities: list[int] = []
+
+    def add_edge(start: int, end: int, capacity: int) -> None:
+        rows.append(start)
+        columns.append(end)
+        capacities.append(capacity)
+
+    for index, (row, column) in enumerate(pixel_coordinates):
+        node_in, node_out = 2 * index, 2 * index + 1
+        terminal = source_crop[row, column] or target_crop[row, column]
+        add_edge(node_in, node_out, infinite if terminal else int(finite_costs[index]))
+        if source_crop[row, column]:
+            add_edge(source_node, node_in, infinite)
+        if target_crop[row, column]:
+            add_edge(node_out, target_node, infinite)
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            candidate = (row + dr, column + dc)
+            neighbor_row, neighbor_column = row + dr, column + dc
             if (
-                0 <= candidate[0] < height
-                and 0 <= candidate[1] < width
-                and mask[candidate]
-                and candidate not in visited
+                0 <= neighbor_row < crop.shape[0]
+                and 0 <= neighbor_column < crop.shape[1]
+                and crop[neighbor_row, neighbor_column]
             ):
-                visited.add(candidate)
-                queue.append((candidate, distance + 1))
-    return float("nan")
+                neighbor = int(pixel_index[neighbor_row, neighbor_column])
+                add_edge(node_out, 2 * neighbor, infinite)
+
+    capacity = coo_matrix(
+        (np.asarray(capacities, dtype=np.int64), (rows, columns)),
+        shape=(graph_nodes, graph_nodes),
+        dtype=np.int64,
+    ).tocsr()
+    result = maximum_flow(capacity, source_node, target_node)
+    residual = (capacity - result.flow).tocsr()
+    reachable = np.zeros(graph_nodes, dtype=bool)
+    reachable[source_node] = True
+    queue = deque([source_node])
+    while queue:
+        node = queue.popleft()
+        start, end = residual.indptr[node], residual.indptr[node + 1]
+        for neighbor, residual_capacity in zip(
+            residual.indices[start:end], residual.data[start:end]
+        ):
+            if residual_capacity > 0 and not reachable[neighbor]:
+                reachable[neighbor] = True
+                queue.append(int(neighbor))
+
+    cut_indices = [
+        index
+        for index in range(pixel_count)
+        if reachable[2 * index] and not reachable[2 * index + 1]
+    ]
+    cut_crop = np.zeros(crop.shape, dtype=bool)
+    if cut_indices:
+        selected = pixel_coordinates[cut_indices]
+        cut_crop[selected[:, 0], selected[:, 1]] = True
+    output[row_min:row_max, column_min:column_max] = cut_crop
+    if (output & (source_core | target_core)).any():
+        return np.zeros(component.shape, dtype=bool), float("nan")
+    return output, float(node_cost[output].sum())
 
 
 def merge_repair_rows(
@@ -515,6 +796,7 @@ def merge_repair_rows(
     gt_masks: list[np.ndarray],
     prediction_masks: list[np.ndarray],
     alpha: float = 0.10,
+    boundary_probability: np.ndarray | None = None,
 ) -> list[dict]:
     """Greedy upper-bound repair distance for every pair inside a merged object."""
     if arrays.intersections.size == 0:
@@ -528,22 +810,76 @@ def merge_repair_rows(
     )
     associated = overlap >= alpha
     rows = []
+    unit_cost = np.ones(prediction_masks[0].shape, dtype=float) if prediction_masks else None
+    probability_cost = (
+        np.maximum(
+            1.0,
+            np.rint(
+                -np.log(np.clip(boundary_probability, 1e-6, 1.0)) * 1000
+            ),
+        )
+        if boundary_probability is not None
+        else None
+    )
     for prediction_index in np.flatnonzero(associated.sum(axis=0) >= 2):
         gt_indices = np.flatnonzero(associated[:, prediction_index])
         for left_pos, left in enumerate(gt_indices):
             for right in gt_indices[left_pos + 1:]:
-                cost = _grid_shortest_path(
-                    prediction_masks[prediction_index], gt_masks[left], gt_masks[right]
+                component = prediction_masks[prediction_index]
+                cut, cut_cost = _minimum_vertex_cut(
+                    component,
+                    gt_masks[left],
+                    gt_masks[right],
+                    unit_cost,
                 )
-                rows.append({
+                row = {
                     "country": country,
                     "chip_id": chip_id,
                     "prediction_id": int(arrays.prediction_ids[prediction_index]),
                     "gt_field_id_a": int(arrays.gt_ids[left]),
                     "gt_field_id_b": int(arrays.gt_ids[right]),
                     "breached": True,
-                    "repair_upper_bound_px": cost,
-                })
+                    "exact_pairwise_min_cut_pixels": (
+                        int(cut.sum()) if np.isfinite(cut_cost) else np.nan
+                    ),
+                    "repair_upper_bound_px": (
+                        int(cut.sum()) if np.isfinite(cut_cost) else np.nan
+                    ),
+                    "exact_pairwise_cut_cost": cut_cost,
+                    "joint_multiway_cut_exact": len(gt_indices) == 2,
+                }
+                if boundary_probability is not None and cut.any():
+                    cut_probability = boundary_probability[cut].astype(float)
+                    weighted_cut, weighted_cost = _minimum_vertex_cut(
+                        component,
+                        gt_masks[left],
+                        gt_masks[right],
+                        probability_cost,
+                    )
+                    row.update(
+                        breach_confidence_max=float(cut_probability.max()),
+                        breach_confidence_min=float(cut_probability.min()),
+                        breach_confidence_mean=float(cut_probability.mean()),
+                        breach_confidence_p10=float(
+                            np.percentile(cut_probability, 10)
+                        ),
+                        confidence_weighted_min_cut_pixels=(
+                            int(weighted_cut.sum())
+                            if np.isfinite(weighted_cost)
+                            else np.nan
+                        ),
+                        confidence_weighted_min_cut_cost=float(weighted_cost),
+                        breach_diagnosis=(
+                            "decoding_failure_candidate"
+                            if 0.30 <= cut_probability.max() < 0.50
+                            else "strong_boundary_evidence_candidate"
+                            if cut_probability.max() >= 0.50
+                            else "representation_failure_candidate"
+                            if cut_probability.max() < 0.10
+                            else "intermediate"
+                        ),
+                    )
+                rows.append(row)
     return rows
 
 
@@ -563,6 +899,25 @@ def aggregate_repair_rows(rows: list[dict]) -> pd.DataFrame:
             "repair_le_2px_fraction": float((costs <= 2).mean()) if len(costs) else np.nan,
             "repair_le_3px_fraction": float((costs <= 3).mean()) if len(costs) else np.nan,
             "repair_cost_median_px": float(costs.median()) if len(costs) else np.nan,
+            "breach_confidence_max_median": (
+                float(scoped.breach_confidence_max.median())
+                if "breach_confidence_max" in scoped
+                else np.nan
+            ),
+            "breach_max_030_to_049_fraction": (
+                float(
+                    scoped.breach_confidence_max.between(
+                        0.30, 0.49, inclusive="both"
+                    ).mean()
+                )
+                if "breach_confidence_max" in scoped
+                else np.nan
+            ),
+            "breach_max_below_010_fraction": (
+                float((scoped.breach_confidence_max < 0.10).mean())
+                if "breach_confidence_max" in scoped
+                else np.nan
+            ),
         })
     return pd.DataFrame(output)
 

@@ -8,10 +8,10 @@ This project provides three complementary evaluators:
 
 - `evaluate_all_countries.py` reports semantic pixel metrics and a lightweight
   connected-component object summary.
-- `evaluate_instance_boundaries.py` is the rigorous field-level evaluator. It
+- `evaluation.instance_boundary` is the rigorous field-level evaluator. It
   uses FTW instance-ID masks as the reference and separately measures field
   detection, field shape, merges/splits, and boundary quality.
-- `evaluate_delineate_anything.py` applies the same field-level definitions to
+- `evaluation.delineate_anything` applies the same field-level definitions to
   the native instance masks produced by Delineate Anything and also reports
   confidence-ranked AP50 and mAP50:95.
 
@@ -210,7 +210,7 @@ module purge
 module load miniforge/24.11.3-py3.12
 source .Field_Boundary/bin/activate
 
-uv run python evaluate_instance_boundaries.py
+uv run python -m evaluation.instance_boundary
 ```
 
 Default paths are:
@@ -224,7 +224,7 @@ Output:  /sfs/weka/scratch/$USER/ftw_results/instance_job_<job-or-time-id>
 Custom paths can be supplied:
 
 ```bash
-uv run python evaluate_instance_boundaries.py \
+uv run python -m evaluation.instance_boundary \
   --data-dir /path/to/ftw \
   --model /path/to/model.ckpt \
   --output-dir /path/to/results \
@@ -246,10 +246,34 @@ uv run python evaluate_instance_boundaries.py \
 | `geometry_population_summary.csv` | Population one-Wasserstein geometry distances |
 | `geometry_border_exclusions.csv` | Truncated objects excluded from geometry |
 | `closing_radius_sweep.csv` | Semantic object F1 after boundary closing at 0–3 px |
-| `merge_repair_distance.csv` | Per-breached-pair greedy repair upper bounds |
+| `merge_repair_distance.csv` | Exact pairwise minimum-node cuts and confidence-weighted cuts for breached fields |
 | `merge_repair_summary.csv` | Repair-cost distribution and fractions within 1/2/3 px |
 | `boundary_probability_sweep.csv` | Semantic pooled PQ and merge/split balance by p2 threshold |
 | `boundary_probability_best_pq.csv` | Maximum semantic PQ and its boundary threshold |
+| `pixel_metrics.csv` | Per-country and combined classwise pixel IoU/precision/recall/F1 |
+| `pixel_confusion.csv` | Long-form raw pixel confusion counts for every evaluation view |
+| `plots/*.png` | Automatically generated presentation figures |
+| `sample_pdfs/<country>/<chip-id>.pdf` | Multi-page image/reference/prediction and per-chip metric report |
+| `probabilistic_metrics.csv` | Semantic NLL, Brier, entropy, accuracy, and adaptive ECE |
+| `calibration_bins.csv` | Overall and distance-stratified adaptive reliability bins |
+| `calibration_by_boundary_distance.csv` | ECE and correct/error entropy by boundary distance |
+| `field_confidence_by_prediction.csv` | Per-field confidence, persistence/area where available, TP/FP, and best IoU |
+| `field_confidence_summary.csv` | AUROC, confidence–IoU correlation, partial correlation, and area ablation |
+| `risk_coverage.csv` | Rematched object F1 and risk over retained-prediction coverage |
+| `risk_coverage_summary.csv` | AURC and F1 at 70% and full coverage |
+| `topology_metrics_by_chip.csv` | Variation of information and Betti-0/Betti-1 errors |
+| `topology_summary.csv` | Chip-macro topology summary with valid counts |
+
+Plots are generated automatically after evaluation. They can also be rebuilt
+without rerunning inference:
+
+```bash
+python -m evaluation.plots --results-dir /path/to/results
+```
+
+Use `--skip-plots` on either evaluator when only CSV output is wanted.
+Use `--skip-sample-pdfs` to suppress per-chip reports on storage-constrained
+runs.
 
 ## Recommended presentation
 
@@ -275,7 +299,7 @@ and whether country results are pooled or macro-averaged.
 
 The FTW command-line interface can run Delineate Anything inference, but it does
 not provide the detailed FTW test-set breakdown described above. Use
-`evaluate_delineate_anything.py` to evaluate any of the three registered
+`evaluation.delineate_anything` to evaluate any of the three registered
 variants:
 
 - `DelineateAnything-S`: smaller version 1 model;
@@ -307,7 +331,7 @@ source .Field_Boundary/bin/activate
 # Run once after cloning or whenever the dependency files change.
 uv sync --extra delineate-anything
 
-uv run --extra delineate-anything python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python -m evaluation.delineate_anything \
   --model DelineateAnythingV2 \
   --window window_b \
   --gpu 0 \
@@ -328,7 +352,7 @@ Ultralytics cache behavior are used. An explicit checkpoint always takes
 precedence:
 
 ```bash
-uv run --extra delineate-anything python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python -m evaluation.delineate_anything \
   --model DelineateAnything \
   --model-path /sfs/weka/scratch/$USER/ftw_models/DelineateAnything.pt \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
@@ -337,15 +361,15 @@ uv run --extra delineate-anything python evaluate_delineate_anything.py \
 To compare all variants, run each in a distinct output directory:
 
 ```bash
-uv run --extra delineate-anything python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python -m evaluation.delineate_anything \
   --model DelineateAnything-S \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_s
 
-uv run --extra delineate-anything python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python -m evaluation.delineate_anything \
   --model DelineateAnything \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v1
 
-uv run --extra delineate-anything python evaluate_delineate_anything.py \
+uv run --extra delineate-anything python -m evaluation.delineate_anything \
   --model DelineateAnythingV2 \
   --output-dir /sfs/weka/scratch/$USER/ftw_results/delineate_v2
 ```
