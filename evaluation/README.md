@@ -30,6 +30,20 @@ closure and boundary-probability sweeps where available, repair distances, and
 Delineate Anything confidence summaries. Use `--skip-sample-pdfs` if storage or
 runtime is more important; a full-data run can create thousands of PDF files.
 
+Generate one readable Markdown report from a complete or partially copied
+results directory:
+
+```bash
+python -m evaluation.summarize_results /path/to/results \
+  --output /path/to/results/evaluation_summary.md
+```
+
+The report begins with field-level TP/FP/FN, precision, recall, F1, matched IoU,
+and PQ. It then covers boundary localization, repair and topology, matched-field
+geometry, confidence, threshold selection, and country rankings. Missing files
+are listed explicitly. When the object summary is absent but both per-field
+match tables exist, the IoU-0.50 summary is reconstructed from those tables.
+
 ## Rivanna SLURM job
 
 Edit the configuration block near the top of `evaluation/run_evaluation.slurm`.
