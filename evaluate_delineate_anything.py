@@ -13,17 +13,17 @@ import torch
 import torch.nn.functional as functional
 from tqdm import tqdm
 
-from evaluate_instance_boundaries import (
+from evaluation import metrics
+from evaluation.metrics import (
     DEFAULT_THRESHOLDS,
     PRIMARY_THRESHOLD,
     ObjectArrays,
-    aggregate_boundary_rows,
     aggregate_object_rows,
     boundary_metrics,
     match_at_threshold,
-    overlap_relations,
 )
 from ftw_tools.inference.models import DelineateAnything
+from ftw_tools.settings import FULL_DATA_COUNTRIES
 from ftw_tools.training.datasets import FTW
 
 
@@ -69,6 +69,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf-threshold", type=float, default=0.05)
     parser.add_argument("--nms-iou-threshold", type=float, default=0.30)
     parser.add_argument("--association-threshold", type=float, default=0.10)
+    parser.add_argument("--metres-per-pixel", type=float, default=10.0)
+    parser.add_argument("--geometry-epsilon-px", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -213,6 +215,11 @@ def ap_summary(detection_rows: list[dict], gt_counts: dict[str, int]) -> pd.Data
             "scope": scope,
             "ground_truth_objects": gt_count,
             "predictions": len(detections),
+            "presence_only_precision_warning": bool(
+                scope == "all_countries"
+                and any(country not in FULL_DATA_COUNTRIES for country in countries)
+                or scope != "all_countries" and scope not in FULL_DATA_COUNTRIES
+            ),
             "ap50": values[0.50],
             "map50_95": float(np.mean(list(values.values()))),
         }
@@ -324,6 +331,8 @@ def main() -> None:
         raise SystemExit("Confidence and NMS IoU thresholds must be between 0 and 1.")
     if not 0 <= args.association_threshold <= 1:
         raise SystemExit("Association threshold must be between 0 and 1.")
+    if args.metres_per_pixel <= 0 or args.geometry_epsilon_px < 0:
+        raise SystemExit("Pixel scale must be positive and geometry epsilon nonnegative.")
 
     device = f"cuda:{args.gpu}" if args.gpu >= 0 else "cpu"
     if args.model_path:
@@ -361,6 +370,10 @@ def main() -> None:
     gt_rows = []
     prediction_rows = []
     boundary_rows = []
+    geometry_rows = []
+    geometry_population_rows = []
+    geometry_exclusions = []
+    repair_rows = []
     detection_rows = []
     gt_counts: dict[str, int] = {}
 
@@ -395,34 +408,41 @@ def main() -> None:
                 )
                 with rasterio.open(instance_path) as source:
                     instance_mask = source.read(1)
-                instance_mask = instance_mask.copy()
-                instance_mask[~valid] = 0
                 masks, confidences = result_masks(result, semantic_target.shape, valid)
-                arrays = build_arrays_from_masks(instance_mask, masks)
-                gt_counts[country] += len(arrays.gt_ids)
-                split_fields, merged_predictions = overlap_relations(
-                    arrays, args.association_threshold
+                arrays = metrics.mask_object_arrays(
+                    semantic_target, instance_mask, masks
                 )
+                gt_counts[country] += len(arrays.gt_ids)
+                object_rows.extend(metrics.object_chip_rows(country, chip_id, arrays))
 
-                for threshold in DEFAULT_THRESHOLDS:
-                    matches = match_at_threshold(arrays, threshold)
-                    object_rows.append(
-                        {
-                            "country": country,
-                            "chip_id": chip_id,
-                            "iou_threshold": threshold,
-                            "true_positives": len(matches),
-                            "false_positives": (
-                                len(arrays.prediction_ids) - len(matches)
-                            ),
-                            "false_negatives": len(arrays.gt_ids) - len(matches),
-                            "matched_ious": [arrays.ious[i, j] for i, j in matches],
-                            "gt_count": len(arrays.gt_ids),
-                            "prediction_count": len(arrays.prediction_ids),
-                            "split_fields": split_fields,
-                            "merged_predictions": merged_predictions,
-                        }
+                gt_interior = np.where(semantic_target == 1, instance_mask, 0)
+                gt_masks = [gt_interior == value for value in arrays.gt_ids]
+                chip_geometry, excluded = metrics.geometry_pair_rows(
+                    country,
+                    chip_id,
+                    arrays,
+                    gt_masks,
+                    list(masks),
+                    epsilon=args.geometry_epsilon_px,
+                )
+                geometry_rows.extend(chip_geometry)
+                geometry_population_rows.extend(
+                    metrics.geometry_population_rows(
+                        country,
+                        chip_id,
+                        gt_masks,
+                        list(masks),
+                        epsilon=args.geometry_epsilon_px,
                     )
+                )
+                repair_rows.extend(
+                    metrics.merge_repair_rows(
+                        country, chip_id, arrays, gt_masks, list(masks)
+                    )
+                )
+                geometry_exclusions.append(
+                    {"country": country, "chip_id": chip_id, **excluded}
+                )
 
                 append_match_tables(
                     country, chip_id, arrays, confidences, gt_rows, prediction_rows
@@ -453,6 +473,7 @@ def main() -> None:
                         **boundary_metrics(
                             target=(semantic_target == 2) & valid,
                             prediction=prediction_boundaries(masks) & valid,
+                            metres_per_pixel=args.metres_per_pixel,
                         ),
                     }
                 )
@@ -460,8 +481,13 @@ def main() -> None:
     if not object_rows:
         raise SystemExit("No downloaded countries with usable test samples were found.")
     object_summary = aggregate_object_rows(object_rows)
-    boundary_summary = aggregate_boundary_rows(boundary_rows)
+    boundary_summary = metrics.aggregate_macro_rows(boundary_rows)
     ap_frame = ap_summary(detection_rows, gt_counts)
+    geometry_summary = metrics.aggregate_geometry_rows(geometry_rows)
+    geometry_population_summary = metrics.aggregate_geometry_population(
+        geometry_population_rows
+    )
+    repair_summary = metrics.aggregate_repair_rows(repair_rows)
 
     object_summary.to_csv(output_dir / "object_summary_by_threshold.csv", index=False)
     ap_frame.to_csv(output_dir / "average_precision_summary.csv", index=False)
@@ -475,6 +501,23 @@ def main() -> None:
         output_dir / "boundary_metrics_by_chip.csv", index=False
     )
     boundary_summary.to_csv(output_dir / "boundary_summary.csv", index=False)
+    pd.DataFrame(geometry_rows).to_csv(
+        output_dir / "geometry_by_matched_field.csv", index=False
+    )
+    geometry_summary.to_csv(output_dir / "geometry_summary.csv", index=False)
+    pd.DataFrame(geometry_population_rows).to_csv(
+        output_dir / "geometry_population.csv", index=False
+    )
+    geometry_population_summary.to_csv(
+        output_dir / "geometry_population_summary.csv", index=False
+    )
+    pd.DataFrame(geometry_exclusions).to_csv(
+        output_dir / "geometry_border_exclusions.csv", index=False
+    )
+    pd.DataFrame(repair_rows).to_csv(
+        output_dir / "merge_repair_distance.csv", index=False
+    )
+    repair_summary.to_csv(output_dir / "merge_repair_summary.csv", index=False)
 
     settings = pd.DataFrame(
         [
@@ -489,6 +532,9 @@ def main() -> None:
                 "confidence_threshold": args.conf_threshold,
                 "nms_iou_threshold": args.nms_iou_threshold,
                 "association_threshold": args.association_threshold,
+                "association_alpha_sweep": "0.05,0.10,0.20,0.30",
+                "metres_per_pixel": args.metres_per_pixel,
+                "geometry_epsilon_px": args.geometry_epsilon_px,
             }
         ]
     )

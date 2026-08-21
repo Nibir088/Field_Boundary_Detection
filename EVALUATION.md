@@ -1,5 +1,9 @@
 # FTW Evaluation Guide
 
+The canonical formula-to-code implementation is documented in
+[`evaluation/README.md`](evaluation/README.md) and implemented once in
+`evaluation/metrics.py`. Both model runners import that shared module.
+
 This project provides three complementary evaluators:
 
 - `evaluate_all_countries.py` reports semantic pixel metrics and a lightweight
@@ -158,8 +162,10 @@ The association test uses overlap coefficient:
 intersection / min(ground-truth area, prediction area) >= 0.10
 ```
 
-The threshold can be changed with `--association-threshold`. Merge and split
-counts explain topology failures that pixel IoU can hide.
+The canonical report sweeps association alpha over 0.05, 0.10, 0.20, and 0.30
+rather than silently relying on one value. Merge and split counts explain
+topology failures that pixel IoU can hide. The `--association-threshold` option
+is retained for command compatibility.
 
 ## Boundary metrics
 
@@ -236,6 +242,14 @@ uv run python evaluate_instance_boundaries.py \
 | `prediction_field_matches_iou50.csv` | One row per predicted field, including best and assigned IoU |
 | `boundary_metrics_by_chip.csv` | Exact, tolerant, and distance boundary metrics for each chip |
 | `boundary_summary.csv` | Country and combined macro-average boundary results |
+| `geometry_by_matched_field.csv` | Paired geometry descriptors/deltas for IoU-0.50 TP pairs |
+| `geometry_population_summary.csv` | Population one-Wasserstein geometry distances |
+| `geometry_border_exclusions.csv` | Truncated objects excluded from geometry |
+| `closing_radius_sweep.csv` | Semantic object F1 after boundary closing at 0–3 px |
+| `merge_repair_distance.csv` | Per-breached-pair greedy repair upper bounds |
+| `merge_repair_summary.csv` | Repair-cost distribution and fractions within 1/2/3 px |
+| `boundary_probability_sweep.csv` | Semantic pooled PQ and merge/split balance by p2 threshold |
+| `boundary_probability_best_pq.csv` | Maximum semantic PQ and its boundary threshold |
 
 ## Recommended presentation
 
@@ -362,7 +376,7 @@ constant across models, for a meaningful precision-recall curve. The default is
 0.05. `--max-detections` defaults to 300 so chips containing many fields are
 less likely to be artificially truncated.
 
-Merge and split counts use the same 0.10 overlap-coefficient association rule as
+Merge and split counts use the same 0.05/0.10/0.20/0.30 association sweep as
 the semantic evaluator. The evaluator also compares the union of one-pixel
 inner edges of predicted instance masks to the FTW semantic boundary class.
 Delineate Anything has no separately predicted boundary class, so this boundary

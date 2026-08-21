@@ -23,6 +23,7 @@ from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from evaluation import metrics
 from ftw_tools.training.datasets import FTW
 from ftw_tools.training.trainers import CustomSemanticSegmentationTask
 
@@ -58,6 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--metres-per-pixel", type=float, default=10.0)
+    parser.add_argument("--geometry-epsilon-px", type=float, default=1.0)
     parser.add_argument(
         "--association-threshold",
         type=float,
@@ -94,11 +97,12 @@ class ObjectArrays:
 
 def model_outputs(
     model: torch.nn.Module, model_type: str, images: torch.Tensor
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if model_type in {"fcsiamdiff", "fcsiamconc", "fcsiamavg"}:
         images = rearrange(images, "b (t c) h w -> b t c h w", t=2)
     with torch.inference_mode():
-        return model(images).argmax(dim=1)
+        logits = model(images)
+        return logits.argmax(dim=1), logits.softmax(dim=1)[:, 2]
 
 
 def build_object_arrays(
@@ -350,7 +354,9 @@ def evaluate_country(
     batch_size: int,
     num_workers: int,
     association_threshold: float,
-) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    metres_per_pixel: float,
+    geometry_epsilon_px: float,
+) -> tuple[list[dict], ...]:
     base_dataset = FTW(
         root=str(data_dir),
         countries=[country],
@@ -370,14 +376,27 @@ def evaluate_country(
     gt_field_rows = []
     prediction_rows = []
     boundary_rows = []
+    geometry_rows = []
+    geometry_population_rows = []
+    geometry_exclusions = []
+    repair_rows = []
+    closing_rows = []
+    probability_rows = []
 
     for batch in tqdm(dataloader, desc=country):
         images = batch["image"].to(device, non_blocking=True) / 3000.0
         semantic_targets = batch["mask"].numpy()
-        predictions = model_outputs(model, model_type, images).cpu().numpy()
+        predicted_classes, boundary_probabilities = model_outputs(
+            model, model_type, images
+        )
+        predictions = predicted_classes.cpu().numpy()
+        boundary_probabilities = boundary_probabilities.cpu().numpy()
 
-        for chip_id, semantic_target, prediction in zip(
-            batch["chip_id"], semantic_targets, predictions
+        for chip_id, semantic_target, prediction, boundary_probability in zip(
+            batch["chip_id"],
+            semantic_targets,
+            predictions,
+            boundary_probabilities,
         ):
             valid = semantic_target != 3
             instance_path = (
@@ -400,15 +419,14 @@ def evaluate_country(
             # Preserve authoritative instance IDs, but compare like with like:
             # the repository polygonizes class-1 interiors and excludes class-2
             # boundary pixels from field objects.
-            instance_mask = instance_mask.copy()
-            instance_mask[semantic_target != 1] = 0
-            prediction_interior = (prediction == 1) & valid
-            arrays = build_object_arrays(instance_mask, prediction_interior)
-            split_fields, merged_predictions = overlap_relations(
-                arrays, association_threshold
+            arrays, gt_labels, prediction_labels = metrics.semantic_object_arrays(
+                semantic_target, instance_mask, prediction
             )
+            instance_mask = gt_labels
 
-            primary_matches = match_at_threshold(arrays, PRIMARY_THRESHOLD)
+            primary_matches = metrics.match_at_threshold(
+                arrays, metrics.PRIMARY_THRESHOLD
+            )
             matched_gt = {
                 gt_index: pred_index for gt_index, pred_index in primary_matches
             }
@@ -416,23 +434,53 @@ def evaluate_country(
                 pred_index: gt_index for gt_index, pred_index in primary_matches
             }
 
-            for threshold in DEFAULT_THRESHOLDS:
-                matches = match_at_threshold(arrays, threshold)
-                object_rows.append(
-                    {
-                        "country": country,
-                        "chip_id": chip_id,
-                        "iou_threshold": threshold,
-                        "true_positives": len(matches),
-                        "false_positives": len(arrays.prediction_ids) - len(matches),
-                        "false_negatives": len(arrays.gt_ids) - len(matches),
-                        "matched_ious": [arrays.ious[i, j] for i, j in matches],
-                        "gt_count": len(arrays.gt_ids),
-                        "prediction_count": len(arrays.prediction_ids),
-                        "split_fields": split_fields,
-                        "merged_predictions": merged_predictions,
-                    }
+            object_rows.extend(metrics.object_chip_rows(country, chip_id, arrays))
+
+            gt_masks = [instance_mask == value for value in arrays.gt_ids]
+            predicted_masks = [
+                prediction_labels == value for value in arrays.prediction_ids
+            ]
+            chip_geometry, excluded = metrics.geometry_pair_rows(
+                country,
+                chip_id,
+                arrays,
+                gt_masks,
+                predicted_masks,
+                epsilon=geometry_epsilon_px,
+            )
+            geometry_rows.extend(chip_geometry)
+            geometry_population_rows.extend(
+                metrics.geometry_population_rows(
+                    country,
+                    chip_id,
+                    gt_masks,
+                    predicted_masks,
+                    epsilon=geometry_epsilon_px,
                 )
+            )
+            repair_rows.extend(
+                metrics.merge_repair_rows(
+                    country, chip_id, arrays, gt_masks, predicted_masks
+                )
+            )
+            geometry_exclusions.append(
+                {"country": country, "chip_id": chip_id, **excluded}
+            )
+            closing_rows.extend(
+                metrics.closing_radius_rows(
+                    country, chip_id, semantic_target, instance_mask, prediction
+                )
+            )
+            probability_rows.extend(
+                metrics.boundary_probability_sweep(
+                    country,
+                    chip_id,
+                    semantic_target,
+                    instance_mask,
+                    prediction,
+                    boundary_probability,
+                )
+            )
 
             for gt_index, gt_id in enumerate(arrays.gt_ids):
                 best_prediction_index = None
@@ -509,14 +557,26 @@ def evaluate_country(
             boundary_row = {
                 "country": country,
                 "chip_id": chip_id,
-                **boundary_metrics(
+                **metrics.boundary_metrics(
                     target=(semantic_target == 2) & valid,
                     prediction=(prediction == 2) & valid,
+                    metres_per_pixel=metres_per_pixel,
                 ),
             }
             boundary_rows.append(boundary_row)
 
-    return object_rows, gt_field_rows, prediction_rows, boundary_rows
+    return (
+        object_rows,
+        gt_field_rows,
+        prediction_rows,
+        boundary_rows,
+        geometry_rows,
+        geometry_population_rows,
+        geometry_exclusions,
+        repair_rows,
+        closing_rows,
+        probability_rows,
+    )
 
 
 def main() -> None:
@@ -532,6 +592,8 @@ def main() -> None:
         raise SystemExit("A GPU was requested, but CUDA is unavailable.")
     if not 0 < args.association_threshold <= 1:
         raise SystemExit("--association-threshold must be in (0, 1].")
+    if args.metres_per_pixel <= 0 or args.geometry_epsilon_px < 0:
+        raise SystemExit("Pixel scale must be positive and geometry epsilon nonnegative.")
 
     device = (
         torch.device(f"cuda:{args.gpu}")
@@ -560,12 +622,29 @@ def main() -> None:
     all_gt_field_rows = []
     all_prediction_rows = []
     all_boundary_rows = []
+    all_geometry_rows = []
+    all_geometry_population_rows = []
+    all_geometry_exclusions = []
+    all_repair_rows = []
+    all_closing_rows = []
+    all_probability_rows = []
 
     print(f"Model: {model_path}")
     print(f"Device: {device}")
     print(f"Countries: {', '.join(countries)}")
     for country in countries:
-        object_rows, gt_rows, prediction_rows, boundary_rows = evaluate_country(
+        (
+            object_rows,
+            gt_rows,
+            prediction_rows,
+            boundary_rows,
+            geometry_rows,
+            geometry_population_rows,
+            geometry_exclusions,
+            repair_rows,
+            closing_rows,
+            probability_rows,
+        ) = evaluate_country(
             country=country,
             data_dir=data_dir,
             model=model,
@@ -574,15 +653,31 @@ def main() -> None:
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             association_threshold=args.association_threshold,
+            metres_per_pixel=args.metres_per_pixel,
+            geometry_epsilon_px=args.geometry_epsilon_px,
         )
         all_object_rows.extend(object_rows)
         all_gt_field_rows.extend(gt_rows)
         all_prediction_rows.extend(prediction_rows)
         all_boundary_rows.extend(boundary_rows)
+        all_geometry_rows.extend(geometry_rows)
+        all_geometry_population_rows.extend(geometry_population_rows)
+        all_geometry_exclusions.extend(geometry_exclusions)
+        all_repair_rows.extend(repair_rows)
+        all_closing_rows.extend(closing_rows)
+        all_probability_rows.extend(probability_rows)
 
-    object_summary = aggregate_object_rows(all_object_rows)
+    object_summary = metrics.aggregate_object_rows(all_object_rows)
     boundary_by_chip = pd.DataFrame(all_boundary_rows)
-    boundary_summary = aggregate_boundary_rows(all_boundary_rows)
+    boundary_summary = metrics.aggregate_macro_rows(all_boundary_rows)
+    geometry_summary = metrics.aggregate_geometry_rows(all_geometry_rows)
+    geometry_population_summary = metrics.aggregate_geometry_population(
+        all_geometry_population_rows
+    )
+    repair_summary = metrics.aggregate_repair_rows(all_repair_rows)
+    probability_summary, probability_best = metrics.aggregate_probability_sweep(
+        all_probability_rows
+    )
 
     object_summary.to_csv(output_dir / "object_summary_by_threshold.csv", index=False)
     pd.DataFrame(all_gt_field_rows).to_csv(
@@ -593,6 +688,48 @@ def main() -> None:
     )
     boundary_by_chip.to_csv(output_dir / "boundary_metrics_by_chip.csv", index=False)
     boundary_summary.to_csv(output_dir / "boundary_summary.csv", index=False)
+    pd.DataFrame(all_geometry_rows).to_csv(
+        output_dir / "geometry_by_matched_field.csv", index=False
+    )
+    geometry_summary.to_csv(output_dir / "geometry_summary.csv", index=False)
+    pd.DataFrame(all_geometry_population_rows).to_csv(
+        output_dir / "geometry_population.csv", index=False
+    )
+    geometry_population_summary.to_csv(
+        output_dir / "geometry_population_summary.csv", index=False
+    )
+    pd.DataFrame(all_geometry_exclusions).to_csv(
+        output_dir / "geometry_border_exclusions.csv", index=False
+    )
+    pd.DataFrame(all_closing_rows).to_csv(
+        output_dir / "closing_radius_sweep.csv", index=False
+    )
+    pd.DataFrame(all_repair_rows).to_csv(
+        output_dir / "merge_repair_distance.csv", index=False
+    )
+    repair_summary.to_csv(output_dir / "merge_repair_summary.csv", index=False)
+    pd.DataFrame(all_probability_rows).to_csv(
+        output_dir / "boundary_probability_sweep_by_chip.csv", index=False
+    )
+    probability_summary.to_csv(
+        output_dir / "boundary_probability_sweep.csv", index=False
+    )
+    probability_best.to_csv(
+        output_dir / "boundary_probability_best_pq.csv", index=False
+    )
+    pd.DataFrame(
+        [
+            {
+                "model": str(model_path),
+                "split": "test",
+                "object_iou_thresholds": "0.25,0.50,0.75",
+                "association_alpha_sweep": "0.05,0.10,0.20,0.30",
+                "boundary_probability_sweep": "0.10:0.05:0.90",
+                "metres_per_pixel": args.metres_per_pixel,
+                "geometry_epsilon_px": args.geometry_epsilon_px,
+            }
+        ]
+    ).to_csv(output_dir / "run_settings.csv", index=False)
 
     print("\nObject summary")
     print(object_summary.to_string(index=False))

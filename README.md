@@ -800,6 +800,18 @@ python evaluate_delineate_anything.py \
   --gpu 0
 ```
 
+The equivalent package entry points are preferred for new automation:
+
+```bash
+python -m evaluation.delineate_anything --model DelineateAnythingV2
+python -m evaluation.instance_boundary --model /path/to/FTW_PRUE_EFNET_B5.ckpt
+```
+
+Both use the canonical implementation in `evaluation/metrics.py`. See
+[`evaluation/README.md`](evaluation/README.md) for the formula-to-code contract,
+connectivity and distance definitions, aggregation rules, geometry exclusions,
+closure diagnostics, threshold sweeps, and presence-only reporting caveats.
+
 The model is downloaded automatically when it is not found in the default model
 directory. To avoid network access during evaluation, supply a downloaded file
 with `--model-path /path/to/DelineateAnythingV2.pt`. Set `--gpu -1` for CPU;
