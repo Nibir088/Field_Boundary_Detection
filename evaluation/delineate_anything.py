@@ -548,11 +548,15 @@ def main() -> None:
     confidence_summary = confidence.confidence_reliability_summary(
         detection_rows, ("native_confidence",)
     )
-    risk_coverage, risk_summary = confidence.risk_coverage_rows(
-        detection_rows,
-        gt_counts,
-        ("native_confidence", "area_pixels"),
-    )
+    try:
+        risk_coverage, risk_summary = confidence.risk_coverage_rows(
+            detection_rows,
+            gt_counts,
+            ("native_confidence", "area_pixels"),
+        )
+    except Exception as error:
+        print(f"WARNING: risk-coverage summary failed: {error}")
+        risk_coverage, risk_summary = pd.DataFrame(), pd.DataFrame()
     topology_summary = metrics.aggregate_macro_rows(topology_rows)
 
     object_summary.to_csv(output_dir / "object_summary_by_threshold.csv", index=False)

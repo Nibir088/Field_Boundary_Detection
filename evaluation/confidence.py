@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 from scipy import ndimage
+from scipy.integrate import trapezoid
 from scipy.stats import rankdata, spearmanr
 
 from evaluation.metrics import N4, ObjectArrays, safe_divide
@@ -388,7 +389,7 @@ def risk_coverage_rows(
                     "scope": scope,
                     "confidence_score": score_column,
                     "aurc": float(
-                        np.trapz(
+                        trapezoid(
                             [row["risk_one_minus_f1"] for row in scope_rows],
                             [row["coverage"] for row in scope_rows],
                         )

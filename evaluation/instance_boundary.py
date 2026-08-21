@@ -800,11 +800,15 @@ def main() -> None:
         all_confidence_rows,
         ("persistence", "mean_interior_probability", "mean_top_confidence"),
     )
-    risk_coverage, risk_summary = confidence.risk_coverage_rows(
-        all_confidence_rows,
-        ground_truth_counts,
-        ("persistence", "mean_interior_probability", "area_pixels"),
-    )
+    try:
+        risk_coverage, risk_summary = confidence.risk_coverage_rows(
+            all_confidence_rows,
+            ground_truth_counts,
+            ("persistence", "mean_interior_probability", "area_pixels"),
+        )
+    except Exception as error:
+        print(f"WARNING: risk-coverage summary failed: {error}")
+        risk_coverage, risk_summary = pd.DataFrame(), pd.DataFrame()
     topology_summary = metrics.aggregate_macro_rows(all_topology_rows)
 
     object_summary.to_csv(output_dir / "object_summary_by_threshold.csv", index=False)

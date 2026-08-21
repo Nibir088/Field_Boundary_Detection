@@ -21,6 +21,8 @@ EVALUATOR="delineate_anything"
 
 DATA_DIR="/sfs/weka/scratch/${USER}/ftw_data/ftw"
 RESULTS_ROOT="/sfs/weka/scratch/${USER}/ftw_results"
+# Optional existing directory, useful when rerunning metrics without replacing PDFs.
+RESULTS_DIR_OVERRIDE=""
 
 # Delineate Anything settings (used only when EVALUATOR=delineate_anything).
 DELANY_MODEL="DelineateAnythingV2"
@@ -31,6 +33,7 @@ DELANY_BATCH_SIZE=16
 # Semantic instance/boundary settings (used only when EVALUATOR=instance_boundary).
 SEMANTIC_MODEL="/sfs/weka/scratch/${USER}/ftw_models/FTW_PRUE_EFNET_B5.ckpt"
 SEMANTIC_BATCH_SIZE=32
+SEMANTIC_NUM_WORKERS=2
 
 # Shared metric settings.
 METRES_PER_PIXEL=10
@@ -40,7 +43,11 @@ WRITE_SUMMARY_PLOTS=true
 # ---------------------------------------------------------------------------
 
 REPO_DIR="${SLURM_SUBMIT_DIR}"
-RESULTS_DIR="${RESULTS_ROOT}/${EVALUATOR}_job_${SLURM_JOB_ID}"
+if [[ -n "${RESULTS_DIR_OVERRIDE}" ]]; then
+    RESULTS_DIR="${RESULTS_DIR_OVERRIDE}"
+else
+    RESULTS_DIR="${RESULTS_ROOT}/${EVALUATOR}_job_${SLURM_JOB_ID}"
+fi
 
 module purge
 module load miniforge/24.11.3-py3.12
@@ -99,7 +106,7 @@ case "${EVALUATOR}" in
             --output-dir "${RESULTS_DIR}" \
             --gpu 0 \
             --batch-size "${SEMANTIC_BATCH_SIZE}" \
-            --num-workers "${SLURM_CPUS_PER_TASK}" \
+            --num-workers "${SEMANTIC_NUM_WORKERS}" \
             --metres-per-pixel "${METRES_PER_PIXEL}" \
             --geometry-epsilon-px "${GEOMETRY_EPSILON_PX}" \
             "${OPTIONAL_ARGS[@]}"
