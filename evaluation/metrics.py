@@ -17,6 +17,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import maximum_flow
 from scipy.stats import wasserstein_distance
 from shapely.geometry import Point, shape
+from shapely.geometry.polygon import orient
 
 from ftw_tools.settings import FULL_DATA_COUNTRIES
 
@@ -26,6 +27,8 @@ ASSOCIATION_THRESHOLDS = (0.05, 0.10, 0.20, 0.30)
 PRIMARY_THRESHOLD = 0.50
 N4 = ndimage.generate_binary_structure(2, 1)
 N8 = ndimage.generate_binary_structure(2, 2)
+TURNING_SAMPLES = 256
+TURNING_SHIFT_CANDIDATES = 16
 
 
 @dataclass
@@ -562,6 +565,66 @@ def geometry_descriptors(geometry) -> dict:
     }
 
 
+def _sample_exterior_tangents(geometry, samples: int = TURNING_SAMPLES) -> np.ndarray:
+    """Sample unit complex tangents at equal normalized-perimeter intervals."""
+    exterior = orient(geometry, sign=1.0).exterior
+    if exterior.length == 0 or samples < 3:
+        return np.asarray([], dtype=np.complex128)
+    distances = np.linspace(0.0, exterior.length, samples, endpoint=False)
+    points = np.asarray(
+        [exterior.interpolate(distance).coords[0] for distance in distances],
+        dtype=float,
+    )
+    # A centered derivative is less sensitive to raster stair steps than a
+    # one-sided edge direction. Equal arc-length sampling makes this scale-free.
+    tangents = np.roll(points, -1, axis=0) - np.roll(points, 1, axis=0)
+    complex_tangents = tangents[:, 0] + 1j * tangents[:, 1]
+    lengths = np.abs(complex_tangents)
+    if np.any(lengths == 0):
+        return np.asarray([], dtype=np.complex128)
+    return complex_tangents / lengths
+
+
+def turning_distance(
+    reference_geometry,
+    prediction_geometry,
+    samples: int = TURNING_SAMPLES,
+) -> float:
+    """Approximate rotation/start/scale-invariant exterior turning distance.
+
+    The returned value is the RMS wrapped tangent-angle disagreement in radians.
+    FFT circular correlation selects promising cyclic starting positions; the
+    angular objective is then evaluated for those candidates. Translation is
+    absent from tangent angles, scale is removed by normalized-perimeter
+    sampling, and the circular mean removes global rotation.
+    """
+    reference = _sample_exterior_tangents(reference_geometry, samples)
+    prediction = _sample_exterior_tangents(prediction_geometry, samples)
+    if len(reference) != samples or len(prediction) != samples:
+        return float("nan")
+
+    correlation = np.fft.ifft(
+        np.fft.fft(reference) * np.conjugate(np.fft.fft(prediction))
+    )
+    candidate_count = min(TURNING_SHIFT_CANDIDATES, samples)
+    strongest = np.argpartition(np.abs(correlation), -candidate_count)[
+        -candidate_count:
+    ]
+    # FFT sign conventions vary with which sequence is treated as the template;
+    # checking both signs keeps the shortlist unambiguous and inexpensive.
+    shifts = set(int(value) for value in strongest)
+    shifts.update(int(-value) % samples for value in strongest)
+
+    best = float("inf")
+    for shift in shifts:
+        shifted = np.roll(prediction, shift)
+        angular_difference = np.angle(reference * np.conjugate(shifted))
+        rotation = np.angle(np.mean(np.exp(1j * angular_difference)))
+        residual = np.angle(np.exp(1j * (angular_difference - rotation)))
+        best = min(best, float(np.sqrt(np.mean(residual**2))))
+    return best
+
+
 def geometry_pair_rows(
     country: str,
     chip_id: str,
@@ -594,6 +657,9 @@ def geometry_pair_rows(
             "perimeter_ratio": safe_divide(
                 prediction_desc["perimeter"], gt_desc["perimeter"]
             ),
+            "turning_distance_radians": turning_distance(
+                gt_geometry, prediction_geometry
+            ),
         }
         for key in gt_desc:
             row[f"gt_{key}"] = gt_desc[key]
@@ -616,6 +682,20 @@ def aggregate_geometry_rows(rows: list[dict]) -> pd.DataFrame:
         scoped = frame if scope == "all_countries" else frame[frame.country == scope]
         row = {"scope": scope, "matched_pairs": len(scoped)}
         row["median_perimeter_ratio"] = float(scoped.perimeter_ratio.median())
+        row["perimeter_ratio_q25"] = float(scoped.perimeter_ratio.quantile(0.25))
+        row["perimeter_ratio_q75"] = float(scoped.perimeter_ratio.quantile(0.75))
+        turning = pd.to_numeric(scoped.turning_distance_radians, errors="coerce")
+        turning = turning[np.isfinite(turning)]
+        row["turning_distance_valid_count"] = len(turning)
+        row["median_turning_distance_radians"] = (
+            float(turning.median()) if len(turning) else np.nan
+        )
+        row["turning_distance_q25_radians"] = (
+            float(turning.quantile(0.25)) if len(turning) else np.nan
+        )
+        row["turning_distance_q75_radians"] = (
+            float(turning.quantile(0.75)) if len(turning) else np.nan
+        )
         row["predicted_interior_rings_per_100_fields"] = float(
             100 * scoped.prediction_holes.sum() / len(scoped)
         )

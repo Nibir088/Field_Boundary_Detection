@@ -182,18 +182,20 @@ def plot_geometry(frame: pd.DataFrame, output: Path, dpi: int) -> None:
     if row.empty:
         return
     row = row.iloc[0]
-    labels = ("Perimeter ratio", "GT right angles", "Pred right angles")
+    labels = ("Perimeter ratio", "Turning distance\n(rad)", "Interior rings\nper 100")
     values = (
         row.get("median_perimeter_ratio", np.nan),
-        row.get("gt_right_angle_fraction", np.nan),
-        row.get("prediction_right_angle_fraction", np.nan),
+        row.get("median_turning_distance_radians", np.nan),
+        row.get("predicted_interior_rings_per_100_fields", np.nan),
     )
-    figure, axis = plt.subplots(figsize=(8, 5))
-    bars = axis.bar(labels, values, color=COLORS[:3])
-    axis.set_ylabel("Value")
-    axis.set_title("Matched-field geometry diagnostics")
-    axis.tick_params(axis="x", rotation=15)
-    axis.bar_label(bars, fmt="%.3f", padding=3)
+    figure, axes = plt.subplots(1, 3, figsize=(11, 4))
+    for axis, label, value, color in zip(axes, labels, values, COLORS[:3]):
+        bars = axis.bar([label], [value], color=color, width=0.55)
+        axis.bar_label(bars, fmt="%.3f", padding=3)
+        axis.set_ylim(bottom=0)
+        axis.tick_params(axis="x", rotation=0)
+    figure.suptitle("Matched-field geometry headlines")
+    figure.tight_layout()
     _save(figure, output / "geometry_headlines.png", dpi)
 
 

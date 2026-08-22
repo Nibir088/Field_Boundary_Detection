@@ -242,7 +242,7 @@ uv run python -m evaluation.instance_boundary \
 | `prediction_field_matches_iou50.csv` | One row per predicted field, including best and assigned IoU |
 | `boundary_metrics_by_chip.csv` | Exact, tolerant, and distance boundary metrics for each chip |
 | `boundary_summary.csv` | Country and combined macro-average boundary results |
-| `geometry_by_matched_field.csv` | Paired geometry descriptors/deltas for IoU-0.50 TP pairs |
+| `geometry_by_matched_field.csv` | Perimeter ratio, sampled turning distance, and supplementary paired descriptors for IoU-0.50 TP pairs |
 | `geometry_population_summary.csv` | Population one-Wasserstein geometry distances |
 | `geometry_border_exclusions.csv` | Truncated objects excluded from geometry |
 | `closing_radius_sweep.csv` | Semantic object F1 after boundary closing at 0–3 px |

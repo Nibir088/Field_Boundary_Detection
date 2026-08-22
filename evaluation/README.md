@@ -218,12 +218,26 @@ Objects are polygonized and both sides are simplified identically at one pixel.
 Border-touching objects are excluded and counted. For IoU-0.50 TP pairs the
 outputs contain paired prediction-minus-reference deltas for area, perimeter,
 Polsby–Popper compactness, solidity, rectangularity, elongation, holes, vertices,
-and right-angle fraction, plus prediction/reference perimeter ratio.
+and right-angle fraction. The detailed descriptors remain available for
+backward-compatible supplementary analysis.
+
+The headline matched-field geometry metrics are:
+
+- median prediction/reference exterior-perimeter ratio, with IQR;
+- median sampled exterior turning-function distance, with IQR; and
+- predicted interior rings per 100 eligible matched fields.
+
+Turning distance is the minimum RMS wrapped tangent-angle disagreement after
+equal normalized-perimeter sampling, cyclic-start alignment, and removal of
+global rotation. It is translation-, rotation-, and scale-invariant, uses 256
+samples, and is reported in radians. FFT correlation shortlists cyclic shifts,
+so this is a documented numerical approximation rather than the exact polygon
+algorithm. Both polygons have already been simplified identically. Interior
+rings measure holes inside predicted fields; between-field closure failures
+remain covered by merge/split and minimum-repair metrics.
 
 Population-level one-Wasserstein distance is computed separately using every
-non-border object. Headline geometry outputs are median perimeter ratio,
-right-angle fraction for predictions and references, and predicted interior
-rings per 100 matched fields.
+non-border object and retained as supplementary output.
 
 ## Interpretation
 

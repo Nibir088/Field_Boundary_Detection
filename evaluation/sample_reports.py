@@ -116,6 +116,7 @@ def chip_metric_values(
     if geometry_rows:
         for key in (
             "perimeter_ratio",
+            "turning_distance_radians",
             "delta_area",
             "delta_perimeter",
             "delta_polsby_popper",

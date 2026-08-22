@@ -1,6 +1,8 @@
 """Regression tests for the shared evaluation contract."""
 
 import numpy as np
+from shapely import affinity
+from shapely.geometry import Polygon
 
 from evaluation import confidence, metrics
 
@@ -126,3 +128,19 @@ def test_exact_minimum_vertex_cut_finds_smallest_raster_separator():
     source_labels = set(labels[source]) - {0}
     target_labels = set(labels[target]) - {0}
     assert not source_labels & target_labels
+
+
+def test_turning_distance_is_invariant_to_translation_rotation_and_scale():
+    reference = Polygon([(0, 0), (4, 0), (4, 1), (2, 3), (0, 1)])
+    transformed = affinity.translate(
+        affinity.rotate(affinity.scale(reference, 2.5, 2.5), 37),
+        xoff=20,
+        yoff=-8,
+    )
+    assert metrics.turning_distance(reference, transformed) < 1e-6
+
+
+def test_turning_distance_separates_different_forms():
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    triangle = Polygon([(0, 0), (2, 0), (1, 2)])
+    assert metrics.turning_distance(square, triangle) > 0.1

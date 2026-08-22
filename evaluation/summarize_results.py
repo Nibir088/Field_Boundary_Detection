@@ -189,8 +189,10 @@ def geometry_confidence(results_dir: Path) -> list[str]:
         output += markdown_table(["Measure", "Result"], [
             ["Eligible matched pairs", count(number(geometry, "matched_pairs"))],
             ["Median predicted/reference perimeter", fmt(number(geometry, "median_perimeter_ratio"))],
-            ["Median area delta", f"{fmt(number(geometry, 'median_delta_area'), 1)} px²"],
-            ["Median perimeter delta", f"{fmt(number(geometry, 'median_delta_perimeter'), 2)} px"],
+            ["Perimeter-ratio IQR", f"{fmt(number(geometry, 'perimeter_ratio_q25'))}–{fmt(number(geometry, 'perimeter_ratio_q75'))}"],
+            ["Median turning distance", f"{fmt(number(geometry, 'median_turning_distance_radians'))} rad"],
+            ["Turning-distance IQR", f"{fmt(number(geometry, 'turning_distance_q25_radians'))}–{fmt(number(geometry, 'turning_distance_q75_radians'))} rad"],
+            ["Turning-distance valid pairs", count(number(geometry, "turning_distance_valid_count"))],
             ["Predicted rings per 100 fields", fmt(number(geometry, "predicted_interior_rings_per_100_fields"), 1)],
         ])
         output += ["", "Geometry is conditional on IoU-0.50 matches and excludes border-touching/invalid polygons; it must not be interpreted as performance over every field.", ""]
