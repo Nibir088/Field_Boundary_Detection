@@ -164,7 +164,13 @@ def repair_topology(results_dir: Path) -> list[str]:
         output += ["`merge_repair_summary.csv` is missing.", ""]
     if topology:
         output += markdown_table(["Topology measure (chip macro)", "Result"], [
+            ["VI merge / under-segmentation", f"{fmt(number(topology, 'vi_merge_bits'))} bits"],
+            ["VI split / over-segmentation", f"{fmt(number(topology, 'vi_split_bits'))} bits"],
             ["Variation of Information", f"{fmt(number(topology, 'variation_of_information_bits'))} bits"],
+            ["Normalized VI", fmt(number(topology, "normalized_variation_of_information"))],
+            ["Adapted Rand Error", fmt(number(topology, "adapted_rand_error"))],
+            ["Rand precision (low indicates merges)", fmt(number(topology, "adapted_rand_precision"))],
+            ["Rand recall (low indicates splits)", fmt(number(topology, "adapted_rand_recall"))],
             ["Reference connected components", fmt(number(topology, "gt_betti0"), 2)],
             ["Predicted connected components", fmt(number(topology, "prediction_betti0"), 2)],
             ["Component-count error", fmt(number(topology, "betti0_error"), 2)],

@@ -262,7 +262,7 @@ uv run python -m evaluation.instance_boundary \
 | `risk_coverage.csv` | Rematched object F1 and risk over retained-prediction coverage |
 | `risk_coverage_summary.csv` | AURC and F1 at 70% and full coverage |
 | `topology_metrics_by_chip.csv` | Variation of information and Betti-0/Betti-1 errors |
-| `topology_summary.csv` | Chip-macro topology summary with valid counts |
+| `topology_summary.csv` | Chip-macro directional VI, normalized VI, Adapted Rand, and supplementary Betti summary with valid counts |
 
 Plots are generated automatically after evaluation. They can also be rebuilt
 without rerunning inference:

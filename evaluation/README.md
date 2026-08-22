@@ -239,6 +239,27 @@ remain covered by merge/split and minimum-repair metrics.
 Population-level one-Wasserstein distance is computed separately using every
 non-border object and retained as supplementary output.
 
+## Topology
+
+Topology partition metrics use the labelled reference foreground as
+\(\Omega\); class-3 unknown pixels and reference background are excluded.
+Prediction label zero inside a reference field is retained as an unassigned
+prediction column and therefore remains an error. One contingency table per
+chip supplies all partition metrics:
+
+- `vi_merge_bits` = \(H(Z\mid\hat Z)\), the under-segmentation term;
+- `vi_split_bits` = \(H(\hat Z\mid Z)\), the over-segmentation term;
+- `variation_of_information_bits` = their sum, using base-2 logarithms;
+- `normalized_variation_of_information` = VI / \(\log_2 |\Omega|\);
+- `adapted_rand_error`, plus Rand precision and recall.
+
+Low Rand precision indicates merging; low Rand recall indicates splitting.
+Results are computed per chip and macro-averaged, with a valid-count column for
+every metric. Betti component/hole errors remain supplementary. VI and ARE are
+pixel-mass weighted, whereas explicit merge/split counts are field weighted;
+their disagreement can expose different behavior in smallholder and commercial
+landscapes.
+
 ## Interpretation
 
 Object results are pooled (micro), boundary results are chip-macro, and geometry

@@ -340,15 +340,31 @@ def plot_topology_summary(frame: pd.DataFrame, output: Path, dpi: int) -> None:
     )
     if selected.empty:
         return
+    labels = selected.scope.str.replace("_", " ").str.title()
     figure, axis = plt.subplots(figsize=(10, max(5, len(selected) * 0.38)))
-    axis.barh(
-        selected.scope.str.replace("_", " ").str.title(),
-        selected.variation_of_information_bits,
-        color=COLORS[0],
-    )
+    if {"vi_merge_bits", "vi_split_bits"}.issubset(selected.columns):
+        axis.barh(labels, selected.vi_merge_bits, color=COLORS[4], label="Merge term")
+        axis.barh(
+            labels,
+            selected.vi_split_bits,
+            left=selected.vi_merge_bits,
+            color=COLORS[0],
+            label="Split term",
+        )
+        axis.legend()
+    else:
+        axis.barh(labels, selected.variation_of_information_bits, color=COLORS[0])
     axis.set_xlabel("Variation of information (bits; lower is better)")
     axis.set_title("Partition topology disagreement by country")
     _save(figure, output / "topology_variation_of_information.png", dpi)
+
+    if "adapted_rand_error" in selected:
+        figure, axis = plt.subplots(figsize=(10, max(5, len(selected) * 0.38)))
+        axis.barh(labels, selected.adapted_rand_error, color=COLORS[2])
+        axis.set_xlim(0, 1)
+        axis.set_xlabel("Adapted Rand Error (lower is better)")
+        axis.set_title("Pair-counting topology disagreement by country")
+        _save(figure, output / "topology_adapted_rand_error.png", dpi)
 
 
 def plot_model_sweep(results: Path, output: Path, dpi: int) -> None:

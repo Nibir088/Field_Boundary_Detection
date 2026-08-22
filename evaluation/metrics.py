@@ -451,47 +451,121 @@ def _betti_numbers(mask: np.ndarray) -> tuple[int, int]:
     return components, int(holes)
 
 
+def foreground_contingency(
+    gt_labels: np.ndarray,
+    prediction_labels: np.ndarray,
+    valid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Contingency C over labelled GT foreground; prediction zero is retained."""
+    selected = gt_labels != 0
+    if valid is not None:
+        selected &= valid
+    if not selected.any():
+        return np.zeros((0, 0), dtype=np.int64)
+    gt_values = gt_labels[selected]
+    prediction_values = prediction_labels[selected]
+    _, gt_compact = np.unique(gt_values, return_inverse=True)
+    pred_ids, pred_compact = np.unique(prediction_values, return_inverse=True)
+    gt_count = int(gt_compact.max()) + 1
+    return np.bincount(
+        gt_compact * len(pred_ids) + pred_compact,
+        minlength=gt_count * len(pred_ids),
+    ).reshape(gt_count, len(pred_ids))
+
+
+def partition_metrics(contingency: np.ndarray) -> dict:
+    """Directional VI (bits), normalized VI, and pair-counting ARE from C."""
+    foreground_pixels = int(contingency.sum())
+    if foreground_pixels == 0:
+        return {
+            "topology_foreground_pixels": 0,
+            "vi_merge_bits": np.nan,
+            "vi_split_bits": np.nan,
+            "variation_of_information_bits": np.nan,
+            "normalized_variation_of_information": np.nan,
+            "adapted_rand_error": np.nan,
+            "adapted_rand_precision": np.nan,
+            "adapted_rand_recall": np.nan,
+        }
+
+    probability = contingency / foreground_pixels
+    p_gt = probability.sum(axis=1)
+    p_prediction = probability.sum(axis=0)
+    positive = probability > 0
+    gt_marginal = np.broadcast_to(p_gt[:, None], probability.shape)
+    prediction_marginal = np.broadcast_to(
+        p_prediction[None, :], probability.shape
+    )
+    vi_merge = float(
+        -np.sum(
+            probability[positive]
+            * np.log2(probability[positive] / prediction_marginal[positive])
+        )
+    )
+    vi_split = float(
+        -np.sum(
+            probability[positive]
+            * np.log2(probability[positive] / gt_marginal[positive])
+        )
+    )
+    variation_information = vi_merge + vi_split
+    normalized_vi = (
+        variation_information / math.log2(foreground_pixels)
+        if foreground_pixels > 1
+        else 0.0
+    )
+
+    counts = contingency.astype(np.float64)
+    gt_counts = counts.sum(axis=1)
+    prediction_counts = counts.sum(axis=0)
+    pair_intersection = float(np.square(counts).sum() - foreground_pixels)
+    pair_gt = float(np.square(gt_counts).sum() - foreground_pixels)
+    pair_prediction = float(np.square(prediction_counts).sum() - foreground_pixels)
+    rand_precision = (
+        pair_intersection / pair_prediction
+        if pair_prediction > 0
+        else (1.0 if pair_intersection == pair_gt == 0 else np.nan)
+    )
+    rand_recall = (
+        pair_intersection / pair_gt
+        if pair_gt > 0
+        else (1.0 if pair_intersection == pair_prediction == 0 else np.nan)
+    )
+    rand_f1 = safe_divide(
+        2 * rand_precision * rand_recall, rand_precision + rand_recall
+    )
+    return {
+        "topology_foreground_pixels": foreground_pixels,
+        "vi_merge_bits": vi_merge,
+        "vi_split_bits": vi_split,
+        "variation_of_information_bits": variation_information,
+        "normalized_variation_of_information": normalized_vi,
+        "adapted_rand_error": 1.0 - rand_f1,
+        "adapted_rand_precision": rand_precision,
+        "adapted_rand_recall": rand_recall,
+    }
+
+
 def topology_metrics(
     gt_labels: np.ndarray,
     prediction_labels: np.ndarray,
     valid: np.ndarray,
 ) -> dict:
-    """Variation of information and foreground Betti-number errors."""
-    selected = valid & ((gt_labels != 0) | (prediction_labels != 0))
-    if selected.any():
-        gt_values = gt_labels[selected]
-        prediction_values = prediction_labels[selected]
-        gt_ids, gt_compact = np.unique(gt_values, return_inverse=True)
-        pred_ids, pred_compact = np.unique(prediction_values, return_inverse=True)
-        contingency = np.bincount(
-            gt_compact * len(pred_ids) + pred_compact,
-            minlength=len(gt_ids) * len(pred_ids),
-        ).reshape(len(gt_ids), len(pred_ids))
-        probability = contingency / contingency.sum()
-        p_gt = probability.sum(axis=1)
-        p_prediction = probability.sum(axis=0)
-        h_gt = -np.sum(p_gt[p_gt > 0] * np.log2(p_gt[p_gt > 0]))
-        h_prediction = -np.sum(
-            p_prediction[p_prediction > 0]
-            * np.log2(p_prediction[p_prediction > 0])
-        )
-        expected = p_gt[:, None] * p_prediction[None, :]
-        positive = probability > 0
-        mutual_information = np.sum(
-            probability[positive]
-            * np.log2(probability[positive] / expected[positive])
-        )
-        variation_information = float(
-            h_gt + h_prediction - 2 * mutual_information
-        )
-    else:
-        variation_information = float("nan")
+    """Foreground-partition VI/ARE and supplementary Betti-number errors.
+
+    Omega is the labelled reference foreground. Prediction label zero is kept
+    inside Omega as a real unassigned-pixel error. VI uses base-2 logarithms;
+    every returned value is per chip and is macro-averaged downstream.
+    """
+    partition = partition_metrics(
+        foreground_contingency(gt_labels, prediction_labels, valid)
+    )
     gt_betti0, gt_betti1 = _betti_numbers((gt_labels != 0) & valid)
     pred_betti0, pred_betti1 = _betti_numbers(
         (prediction_labels != 0) & valid
     )
     return {
-        "variation_of_information_bits": variation_information,
+        **partition,
         "gt_betti0": gt_betti0,
         "prediction_betti0": pred_betti0,
         "betti0_error": pred_betti0 - gt_betti0,

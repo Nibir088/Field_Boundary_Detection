@@ -110,6 +110,54 @@ def test_topology_metrics_detect_component_count_error():
     assert row["gt_betti0"] == 2
     assert row["prediction_betti0"] == 1
     assert row["betti0_error"] == -1
+    assert row["vi_merge_bits"] == 1
+    assert row["vi_split_bits"] == 0
+
+
+def test_topology_directional_vi_and_adapted_rand_sanity():
+    gt = np.array([[1, 1, 2, 2], [1, 1, 2, 2]])
+    over = np.array([[1, 3, 2, 2], [1, 3, 2, 2]])
+    under = np.ones_like(gt)
+    valid = np.ones_like(gt, dtype=bool)
+
+    identity = metrics.partition_metrics(
+        metrics.foreground_contingency(gt, gt, valid)
+    )
+    split = metrics.partition_metrics(
+        metrics.foreground_contingency(gt, over, valid)
+    )
+    merge = metrics.partition_metrics(
+        metrics.foreground_contingency(gt, under, valid)
+    )
+
+    assert identity["variation_of_information_bits"] == 0
+    assert identity["adapted_rand_error"] == 0
+    assert split["vi_split_bits"] > split["vi_merge_bits"]
+    assert merge["vi_merge_bits"] > merge["vi_split_bits"]
+    assert split["adapted_rand_recall"] < split["adapted_rand_precision"]
+    assert merge["adapted_rand_precision"] < merge["adapted_rand_recall"]
+
+
+def test_topology_keeps_unassigned_prediction_inside_reference_foreground():
+    gt = np.array([[1, 1, 1, 1]])
+    prediction = np.array([[1, 1, 0, 0]])
+    contingency = metrics.foreground_contingency(gt, prediction)
+    assert contingency.shape == (1, 2)
+    assert contingency.sum() == 4
+    assert metrics.partition_metrics(contingency)["vi_split_bits"] > 0
+
+
+def test_variation_of_information_symmetry_and_triangle_inequality():
+    first = np.array([[1, 1, 2, 2, 3, 3]])
+    second = np.array([[1, 2, 2, 2, 3, 3]])
+    third = np.array([[1, 2, 3, 3, 3, 3]])
+
+    def distance(left, right):
+        table = metrics.foreground_contingency(left, right)
+        return metrics.partition_metrics(table)["variation_of_information_bits"]
+
+    assert np.isclose(distance(first, second), distance(second, first))
+    assert distance(first, third) <= distance(first, second) + distance(second, third) + 1e-12
 
 
 def test_exact_minimum_vertex_cut_finds_smallest_raster_separator():
